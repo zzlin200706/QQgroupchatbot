@@ -44,6 +44,12 @@ class MessageRenderer:
         self._include_platform_ids = include_platform_ids
         self._max_chars = max_chars
 
+    @property
+    def max_chars(self) -> int | None:
+        """Expose whether this presentation renderer is configured to truncate."""
+
+        return self._max_chars
+
     def render_message(self, message: InternalMessage) -> str:
         """Render one message, resolving mentions only from that message tree."""
 

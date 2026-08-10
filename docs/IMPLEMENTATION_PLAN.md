@@ -576,6 +576,95 @@ summary、QA、embedding 或向量存储。
 
 ---
 
+# Phase H — LLM Provider + DeepSeek Provider + Group Summary Pipeline
+
+## 架构与边界
+
+```text
+ConversationQueryService
+  ↓
+Sequence[InternalMessage]
+  ↓
+MessageRenderer (no truncation)
+  ↓
+SummaryService
+  ↓
+LLMProvider
+  ↓
+DeepSeekProvider
+  ↓
+validated SummaryResult
+```
+
+本阶段只提供显式调用的 Python service API 和 in-memory result。没有接入 OneBot live callback、Bot
+Actions、定时任务、FastAPI summary endpoint、QA、embedding、vector DB、图片下载或 summary
+persistence。LLM 只接收 Renderer 输出，不读取 ORM、raw event、segment raw data 或 adapter response。
+
+## DeepSeek V4 provider
+
+根据 2026-08-10 的 DeepSeek 官方 Chat Completions、Thinking Mode、JSON Output 与 Error Codes 文档：
+
+- OpenAI-compatible base URL 为 `https://api.deepseek.com`，调用 `POST /chat/completions`；
+- 默认 model 为 `deepseek-v4-flash`，允许配置覆盖；不使用 legacy `deepseek-chat` /
+  `deepseek-reasoner`；
+- 请求显式发送 `stream=false`、`thinking={"type":"disabled"}`、`max_tokens` 和
+  `response_format={"type":"json_object"}`；prompt 同时明确要求 JSON 并给出 schema 示例；
+- 不发送 `user_id`，尤其不把 group id、QQ/OpenID、raw event id 或 message id 当作 provider metadata；
+- 使用可复用、可注入的 `httpx.AsyncClient`，每次 request 有明确 timeout；内部创建的 client 可通过
+  `aclose()` 释放，测试注入的 client 由 caller 管理；
+- `max_retries=N` 表示首次请求后最多再尝试 N 次。429/500/503、timeout、connection error 和 invalid
+  response 使用 0.5s、1.0s…… bounded exponential backoff；400/401/402/422 不重试；
+- provider 日志只包含 provider、model、HTTP status、attempt、exception type 和 input char count，不输出
+  key、Authorization、prompt、conversation、response body/content 或身份/group metadata。
+
+官方资料：
+
+- https://api-docs.deepseek.com/api/create-chat-completion
+- https://api-docs.deepseek.com/guides/thinking_mode
+- https://api-docs.deepseek.com/guides/json_mode/
+- https://api-docs.deepseek.com/quick_start/error_codes/
+
+## Provider abstraction 与结果
+
+- `LLMRequest` 只包含 system prompt、user prompt、max output tokens 与 JSON-output flag；
+- `LLMResponse` 只提取 content、provider、response model、finish reason 与明确返回的 usage；不保存
+  reasoning content；usage 缺失字段保持 `None`；
+- provider exceptions 将 authentication、payment、request、rate limit、server、timeout、connection 和
+  invalid response 与 HTTP/transport implementation detail 分离；
+- `SummaryResult` 是 immutable business model，包含程序确定的平台/群/时间/message count、严格校验的
+  summary/topics/key points/decisions/action items/open questions、provider/model/finish reason、input chars、
+  prompt version 和 optional token usage；LLM JSON 无法覆盖程序 metadata；
+- `SummaryActionItem.owner/deadline` 接受明确字符串或 `None`，prompt 禁止模型猜测缺失值；
+- summary payload 使用 Pydantic strict schema 和 `extra=forbid`，不修复 malformed JSON、不强制转换错误
+  字段、不接受额外 metadata。`finish_reason=length`、空 choices/content、invalid JSON/schema 都不能产生
+  business result。
+
+## Prompt safety 与完整覆盖
+
+- `SUMMARY_PROMPT_VERSION="1"`；system prompt 把 conversation 明确标记为不可信数据，群聊中的 prompt
+  injection 仍保留为事实文本但不会变成 system instruction；
+- prompt 禁止猜测 unknown/unavailable author、图片/文件内容、unresolved forward、决定、owner 或
+  deadline；`[作者未知]`、`[原作者不可用]`、`[图片]` 和 `[合并转发：内容未解析]` 的不确定性必须保留；
+- SummaryService 用 `requested_limit + 1` 查询；多出一条即抛 `SummaryWindowTooLarge`，且不调用 provider；
+- Renderer 必须是 `max_chars=None`；完整 rendered text 超过 `SUMMARY_MAX_INPUT_CHARS` 时同样拒绝，不做
+  silent truncation；本阶段不实现 chunk/map-reduce；
+- 空窗口返回 provider/model 为 `none` 的正常空结果，provider calls 为零；
+- user prompt 只加入 UTC time window、message count 与 Renderer safe text，不加入 group id；
+- 本阶段 SummaryResult 不入库，不保存完整 prompt。
+
+## 已验证范围
+
+- DeepSeek request URL/header/body、non-thinking JSON mode、model/output-token configuration、optional usage；
+- 400/401/402/422 permanent errors，429/500/503 bounded retry，timeout，invalid envelope/choices/content/JSON
+  和 length finish reason；retry tests 使用 injected sleep，不真实等待或联网；
+- successful strict summary、action item、program metadata、prompt injection、empty window、message overflow、
+  char overflow、no renderer truncation、malformed/schema-invalid/extra JSON；
+- OneBot nested forward、QQ Official 102 unresolved forward 与 QQ Official 103 reply fixture 均完成 parser →
+  normalized DB → ConversationQueryService → MessageRenderer → SummaryService → FakeLLMProvider 集成链，
+  不泄漏 forward ids、QQ IDs、Gateway/raw JSON、attachment URL 或 `REFIDX_*`。
+
+---
+
 # Phase 6 — 合并转发
 
 这是核心 Phase，不允许跳过测试。

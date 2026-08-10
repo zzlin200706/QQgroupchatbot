@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,6 +23,16 @@ class Settings(BaseSettings):
     qq_bot_app_secret: str = ""
 
     database_url: str = "sqlite+aiosqlite:///./data/qqgroupchatbot.db"
+
+    deepseek_api_key: SecretStr = SecretStr("")
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_model: str = "deepseek-v4-flash"
+    deepseek_timeout_seconds: float = Field(default=60.0, gt=0)
+    deepseek_max_retries: int = Field(default=2, ge=0)
+    deepseek_max_output_tokens: int = Field(default=4096, gt=0)
+
+    summary_max_messages: int = Field(default=500, ge=1)
+    summary_max_input_chars: int = Field(default=120000, ge=1)
 
     forward_max_depth: int = Field(default=10, ge=1)
     forward_max_nodes: int = Field(default=500, ge=1)
