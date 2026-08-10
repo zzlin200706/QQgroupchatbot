@@ -313,54 +313,81 @@ forward node sender。
 
 ---
 
-# Phase 4 — Normalizer + 基础 Parser
+# Phase 4 — Internal Message Model + Message Parser v1
 
-先支持：
-
-- text
-- at
-- image
-- file
-- face/mface
-- json
-- unknown
-
-不要做 forward。
-
-## 关键验收
-
-消息：
+## 架构与边界
 
 ```text
-hello @B [image]
+RawEvent.raw_payload + raw_events.id
+  ↓
+OneBotMessageParser
+  ↓
+InternalMessage (in-memory only)
 ```
 
-内部 nodes 顺序必须保持：
+Parser 只接收已存储的 raw payload 和可选的 raw event id；它不依赖 WebSocket，不修改
+raw event，不写 normalized 表，也不会调用 `get_msg`、`get_forward_msg`、下载媒体或访问
+任何 AI 服务。
 
-```text
-text
-at
-image
-```
+## 领域模型
 
-不能只提取成一个纯文本字符串。
+- `InternalMessage`：平台消息 ID、`source_raw_event_id`、context、actor、author、时间、
+  保序 segments 与 direct-event provenance。
+- `IdentityRef`：`platform`、`user_id`、display name、card、`availability` 和明确的
+  source。actor 与 author 是独立字段；直接 message event 的 top-level user_id 只用于
+  该 direct event，不能传播到 forward node。
+- `MessageProvenance`：`direct_event`、`forward_node` 或 `nested_forward_node`，包含 raw
+  event id、父节点 ID 和 forward depth。
+
+身份缺失时采用 `availability=unavailable`、`source=unknown`，不填充外层转发者。
+
+## Segment v1
+
+已实现并保留 `raw_data` 的 segment：
+
+- `TextSegment`、`AtSegment`（`qq=all` 明确为 `is_all`）、`ImageSegment`、`ReplySegment`；
+- `FileSegment`；
+- `ForwardSegment`；
+- `UnknownSegment`，保留原 type 与 data。
+
+NapCat 当前文档确认 text、at、reply、image、file 与 forward 的上述基础字段。所有未映射
+字段仍保留在 `raw_data`；未识别的 segment 不会让整条消息失败。
+
+## Reply 与 forward
+
+- reply 仅表达当前 payload 明确给出的 referenced message id；不构造被引用作者。
+- 只有 forward id 时，`ForwardSegment(resolved=False, resolution_status=unresolved)`；
+  本阶段不联网展开。
+- 如 payload 已含 `forward.data.content`，parser 保留 content 的递归树；`node` 的 sender
+  只从 node 自己明确给出的字段建立。forward depth、node 数和 segment 数为 parser 的
+  构造参数（默认值与项目配置一致）；超限时保留原始 data 并标记未解析状态。
+
+## 测试与真实 smoke
+
+- 普通群文本、actor/author、source raw event id；
+- text/@/text/image 的顺序、image/file/reply 的 raw data；
+- 未知 segment、缺失身份、非 message event 和 raw payload 不变性；
+- unresolved forward、内嵌 node tree、深度限制以及 node sender 不继承 outer actor；
+- 2026-08-10：从 Phase 3 SQLite 已存群消息 receipt 解析成功，结果为 group +
+  `TextSegment`，actor/author 均为 known；未输出群号、昵称、正文或凭据。
+
+## 完成标准
+
+- [x] InternalMessage、Identity、provenance 和 recursive forward node 模型；
+- [x] text / at / image / reply / file / forward / unknown segment；
+- [x] segment 顺序、未知字段、raw event id 和 raw payload 不变性；
+- [x] forward unresolved 与 nested tree，缺失 node sender 不会继承 outer sender；
+- [x] 非 message event 安全返回 None；
+- [x] Phase 1–3 regression 与 Phase 4 tests 通过；
+- [x] 真实普通群消息 parser smoke 通过；
+- [x] 本阶段未创建 normalized DB 表、未泄露凭据或群聊内容，diff check 通过。
 
 ---
 
-# Phase 5 — Reply
+# Phase 5 — Reference Enrichment
 
-实现 reply segment。
-
-第一步只保存引用 ID。
-
-第二步再实现可配置的 `get_msg` resolution。
-
-如果 get_msg 失败：
-
-- 当前消息仍然成功；
-- reply 标记 unavailable/error。
-
-测试“当前作者”和“被引用消息作者”不会混淆。
+reply/forward 的网络 resolution 属于后续 enrichment：可选调用 `get_msg` 或
+`get_forward_msg`，但必须保持当前 parser 的 raw-data-first、作者不猜测和树结构原则。
 
 ---
 
