@@ -455,6 +455,59 @@ ReferenceEnrichmentService (optional, in-memory)
 
 ---
 
+# Phase F — Normalized Message Persistence
+
+## 架构与边界
+
+```text
+committed raw_events receipt
+  ↓
+pure platform parser
+  ↓
+InternalMessage
+  ↓
+MessageRepository + explicit message codec
+  ↓
+messages + message_nodes
+```
+
+本阶段只新增 normalized 表，不修改已有 `raw_events` schema。OneBot live callback 在 raw receipt
+成功 commit 后执行纯解析和 normalized persistence；parser 返回 `None`、解析失败或 normalized 写入失败
+都不会删除 raw receipt，也不会调用 reference enrichment、下载媒体或执行网络补全。
+
+## Schema 与 codec
+
+- `messages` 保存 parser name/version、平台消息索引、顶层 context、actor/author identity snapshot、
+  provenance 和 raw receipt foreign key；`(source_raw_event_id, parser_name, parser_version)` 唯一。
+- `message_nodes` 使用 `parent_node_id + relation + position + depth` 保存显式树。当前 relation 为
+  `segments`、`content`、`nodes`、`resolved_message`，因此 forward 的 loose content、node collection 与
+  reply resolved reference 不会混淆。
+- node kind 显式覆盖 text、at、image、file、reply、forward、forward_node、resolved_message 和 unknown。
+  enum 使用 `.value`；结构中的 datetime 使用 ISO 8601；所有 parser `raw_data`/`resolved_raw_data` 保留在
+  JSON payload，不使用 pickle 或 `dataclasses.asdict()`。
+- 顶层 actor/author、forward node sender 和 resolved reference author 都按当时的完整 identity snapshot
+  保存，包括 platform、source 与 availability。缺失 sender round-trip 后仍为 unavailable/unknown，绝不
+  继承外层 author。
+
+## Transaction、幂等与 replay
+
+- 一条 message row 与其全部 node rows 在同一 transaction 中插入；任意 node 失败会整体 rollback。
+- 相同 raw receipt + parser name/version 幂等返回既有表示；新 parser version 可为相同 receipt 增加新表示。
+- 相同 platform message id 的不同 raw receipts 可以分别 normalized；platform message id 仅有普通索引。
+- SQLite connection 启用 foreign key enforcement，确保 normalized message 必须引用真实 raw receipt。
+
+## 已验证范围
+
+- OneBot 真实脱敏文本 fixture 严格 `InternalMessage == reload`；
+- nested forward 的 `content`/`nodes` relation、深度、segment position、provenance 和 unavailable sender；
+- enriched reply 的 resolved message/segments/author/raw response；
+- QQ Official text/@/image/file/103/102 真实脱敏 samples；102 仍为 unresolved、nodes 为空，103 的
+  `REFIDX_*` 仍只存在于 raw data；
+- idempotency、parser replay、duplicate raw receipts、unknown segment、transaction rollback、非消息事件、
+  normalized failure 后下一 receipt 继续处理，以及 live OneBot raw-first pipeline。
+
+---
+
 # Phase 6 — 合并转发
 
 这是核心 Phase，不允许跳过测试。

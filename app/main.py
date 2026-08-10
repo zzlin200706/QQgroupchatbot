@@ -11,8 +11,11 @@ from pydantic import BaseModel
 
 from app.adapters.onebot.client import OneBotClient
 from app.config import Settings, get_settings
+from app.parsers.onebot_message_parser import OneBotMessageParser
+from app.services.normalized_message_ingestion import NormalizedMessageIngestionService
 from app.services.raw_event_ingestion import RawEventIngestionService
 from app.storage.database import Database
+from app.storage.message_repository import MessageRepository
 from app.storage.raw_event_repository import RawEventRepository
 
 
@@ -34,11 +37,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         database = Database(app_settings.database_url)
         await database.initialize()
-        repository = RawEventRepository(database.session_factory)
-        ingestion_service = RawEventIngestionService(repository)
+        raw_repository = RawEventRepository(database.session_factory)
+        raw_ingestion_service = RawEventIngestionService(raw_repository)
+        message_repository = MessageRepository(database.session_factory)
+        normalized_ingestion_service = NormalizedMessageIngestionService(
+            repository=message_repository,
+            parser=OneBotMessageParser(
+                max_forward_depth=app_settings.forward_max_depth,
+                max_forward_nodes=app_settings.forward_max_nodes,
+                max_message_segments=app_settings.message_max_segments,
+            ),
+        )
 
         async def ingest_onebot_event(event: dict[str, object]) -> None:
-            persisted = await ingestion_service.ingest(event)
+            persisted = await raw_ingestion_service.ingest(event)
             if persisted is not None:
                 logger.info(
                     "raw event persisted id=%s post_type=%s message_type=%s payload_hash=%s",
@@ -47,6 +59,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     persisted.message_type,
                     persisted.payload_hash,
                 )
+                normalized = await normalized_ingestion_service.ingest(persisted)
+                if normalized is not None:
+                    logger.info(
+                        "normalized message persisted raw_event_id=%s platform=%s",
+                        persisted.id,
+                        normalized.platform,
+                    )
 
         client = OneBotClient(
             url=app_settings.onebot_ws_url,
@@ -58,8 +77,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             reconnect_max_delay=app_settings.onebot_reconnect_max_delay_seconds,
         )
         application.state.database = database
-        application.state.raw_event_repository = repository
-        application.state.raw_event_ingestion_service = ingestion_service
+        application.state.raw_event_repository = raw_repository
+        application.state.raw_event_ingestion_service = raw_ingestion_service
+        application.state.message_repository = message_repository
+        application.state.normalized_message_ingestion_service = normalized_ingestion_service
         application.state.onebot_client = client
         await client.start()
         try:

@@ -1,5 +1,8 @@
-"""Application services that coordinate adapters and storage."""
+"""Application services that coordinate adapters, parsers, and storage."""
 
+from app.services.normalized_message_ingestion import (
+    NormalizedMessageIngestionService,
+)
 from app.services.reference_enrichment import ReferenceEnrichmentService
 
-__all__ = ["ReferenceEnrichmentService"]
+__all__ = ["NormalizedMessageIngestionService", "ReferenceEnrichmentService"]
