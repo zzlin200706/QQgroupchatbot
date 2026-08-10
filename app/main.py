@@ -11,6 +11,9 @@ from pydantic import BaseModel
 
 from app.adapters.onebot.client import OneBotClient
 from app.config import Settings, get_settings
+from app.services.raw_event_ingestion import RawEventIngestionService
+from app.storage.database import Database
+from app.storage.raw_event_repository import RawEventRepository
 
 
 logger = logging.getLogger(__name__)
@@ -29,21 +32,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+        database = Database(app_settings.database_url)
+        await database.initialize()
+        repository = RawEventRepository(database.session_factory)
+        ingestion_service = RawEventIngestionService(repository)
+
+        async def ingest_onebot_event(event: dict[str, object]) -> None:
+            persisted = await ingestion_service.ingest(event)
+            if persisted is not None:
+                logger.info(
+                    "raw event persisted id=%s post_type=%s message_type=%s payload_hash=%s",
+                    persisted.id,
+                    persisted.post_type,
+                    persisted.message_type,
+                    persisted.payload_hash,
+                )
+
         client = OneBotClient(
             url=app_settings.onebot_ws_url,
             access_token=app_settings.onebot_access_token,
-            event_handler=_log_onebot_event,
+            event_handler=ingest_onebot_event,
             connect_timeout=app_settings.onebot_connect_timeout_seconds,
             action_timeout=app_settings.onebot_action_timeout_seconds,
             reconnect_initial_delay=app_settings.onebot_reconnect_initial_delay_seconds,
             reconnect_max_delay=app_settings.onebot_reconnect_max_delay_seconds,
         )
+        application.state.database = database
+        application.state.raw_event_repository = repository
+        application.state.raw_event_ingestion_service = ingestion_service
         application.state.onebot_client = client
         await client.start()
         try:
             yield
         finally:
             await client.stop()
+            await database.dispose()
 
     application = FastAPI(
         title="qqgroupchatbot",
@@ -60,20 +83,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     return application
-
-
-async def _log_onebot_event(event: dict[str, object]) -> None:
-    """Log a safe transport-level event summary without parsing its contents."""
-
-    if event.get("post_type") == "message" and event.get("message_type") == "group":
-        logger.info(
-            "event=message.group message_id=%s group_id=%s",
-            event.get("message_id"),
-            event.get("group_id"),
-        )
-        return
-
-    logger.info("event=onebot.%s", event.get("post_type", "unknown"))
 
 
 app = create_app()

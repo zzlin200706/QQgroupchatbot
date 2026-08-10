@@ -223,44 +223,93 @@ group_id=...
 
 ## 目标
 
-先保证“一条消息都不丢”。
+将每一次由 OneBot adapter 分派的业务事件完整、可追溯地保存到 SQLite；本阶段不解析
+消息语义。
 
-实现：
+## 架构
 
 ```text
+OneBot adapter business callback
+  ↓
+RawEventIngestionService
+  ↓
+RawEventRepository
+  ↓
 raw_events
 ```
 
-字段至少：
+`Database` 集中管理 async engine、session factory、`create_all` 和 dispose。FastAPI
+lifespan 先初始化数据库，再启动 adapter；关闭时先停止 adapter，再 dispose engine。
+
+## raw_events schema
 
 ```text
-id
-event_type
-platform_message_id nullable
-received_at
-dedup_key
-raw_json
-parse_status
-parse_error nullable
+id                 INTEGER primary key
+platform           TEXT, currently onebot11
+received_at        UTC datetime (local receipt time)
+event_time         nullable UTC datetime (only a usable top-level numeric time)
+post_type          nullable TEXT
+message_type       nullable TEXT
+sub_type           nullable TEXT
+self_id            nullable TEXT
+user_id            nullable TEXT
+group_id           nullable TEXT
+message_id         nullable TEXT
+raw_payload        JSON, complete received payload
+payload_hash       SHA-256 canonical-JSON diagnostic index
 ```
 
-流程：
+`self_id`、`user_id`、`group_id` 和 `message_id` 均作为可空 `TEXT` 索引副本保存，避免
+对未来平台 ID 的数值范围或表示方式作假设。它们不表示内部消息作者身份，更不用于推断
+forward node sender。
 
-```text
-WS event
-  ↓
-dedup
-  ↓
-raw DB save
-  ↓
-后续解析
-```
+`raw_payload` 使用 SQLAlchemy JSON 完整保存。读取后与输入 payload 在 JSON 结构意义上
+相等；未知字段、数组和任意嵌套树不会被 storage 层删除、改写或解释。
 
-## 测试
+## transaction 与重复策略
 
-- 同一 fixture 输入两次；
-- raw event 只保存一次；
-- parser 尚未实现也不影响保存。
+- 每个 raw event receipt 使用独立 session 和 transaction；异常 rollback 后上报给
+  ingestion service。
+- `payload_hash` 是 deterministic JSON SHA-256，仅用于调试与后续重复分析；没有唯一
+  约束。
+- 即使 payload 完全相同，也会保留两条 receipt，避免重连/重放排查时丢失实际收到的事件。
+- 写入失败只记录不含 payload 的 event metadata、hash 与异常，且不会让 OneBot receive
+  loop 永久停止；后续事件仍继续处理。
+
+## 初始化与限制
+
+- 当前早期 schema 使用集中化的 `create_all`，尚未引入 Alembic；schema 开始频繁演进时
+  再评估 migration。
+- 文件型 SQLite URL 的父目录会在 database 初始化前创建；实际 `data/*.db` 已由 Git
+  忽略。
+- Phase 3 不做 Message Parser、reply/@/file/image/forward 解析、Internal Message Model、
+  查询 API 或 AI 功能。
+
+## 测试与真实联调
+
+- fixture raw payload round-trip 和顶层索引提取；
+- 未知字段、generic nested JSON tree、缺失索引字段与相同 payload 的双 receipt；
+- adapter callback → SQLite 接线，且 heartbeat/lifecycle 不入 raw storage；
+- 首次 SQLite 写入失败后，第二条 adapter event 仍可落库；
+- FastAPI lifespan 初始化 storage 并保留 Phase 2 adapter lifecycle；
+- 2026-08-10 真实 NapCat smoke：测试群文本成功新增一条 `raw_events` receipt，确认
+  `post_type=message`、`message_type=group` 与完整 raw payload 已存储，未打印真实 payload
+  或身份标识。
+
+## 完成标准
+
+- [x] SQLite async storage 与 raw_events table 正常创建；
+- [x] OneBot business event 自动写库；
+- [x] raw_payload、未知字段和 nested JSON tree 无损保存；
+- [x] 缺失索引字段时可正常保存为 NULL；
+- [x] 相同 payload 可保存多次；
+- [x] write failure 不会永久杀死 adapter receive loop；
+- [x] heartbeat/lifecycle 不进入普通业务 raw storage；
+- [x] FastAPI lifespan 正确初始化/关闭 database；
+- [x] Phase 1/2 regression 与 Phase 3 tests 通过（17 passed）；
+- [x] 真实 NapCat 群消息成功写入 SQLite；
+- [x] 未泄露 Access Token，实际数据库文件未加入 Git；
+- [x] 文档已更新，git diff --check 通过。
 
 ---
 
