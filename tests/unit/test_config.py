@@ -16,6 +16,9 @@ def test_phase_h_defaults_and_secret_redaction() -> None:
     assert settings.deepseek_max_output_tokens == 4096
     assert settings.summary_max_messages == 500
     assert settings.summary_max_input_chars == 120000
+    assert settings.summary_command_enabled is False
+    assert settings.summary_command_lookback_minutes == 120
+    assert settings.summary_command_cooldown_seconds == 60
     assert settings.deepseek_api_key.get_secret_value() == "private-test-key"
     assert "private-test-key" not in repr(settings)
 
@@ -28,6 +31,8 @@ def test_phase_h_defaults_and_secret_redaction() -> None:
         {"deepseek_max_output_tokens": 0},
         {"summary_max_messages": 0},
         {"summary_max_input_chars": 0},
+        {"summary_command_lookback_minutes": 0},
+        {"summary_command_cooldown_seconds": -1},
     ],
 )
 def test_phase_h_numeric_settings_are_validated(override: dict[str, int]) -> None:

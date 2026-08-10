@@ -9,6 +9,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
@@ -41,8 +42,19 @@ class OneBotActionTimeoutError(OneBotClientError):
     """Raised when an action response is not received before its timeout."""
 
 
+class OneBotActionResponseError(OneBotClientError):
+    """Raised when OneBot returns a non-success action response."""
+
+
 class OneBotDisconnectedError(OneBotClientError):
     """Raised for actions interrupted by a WebSocket disconnection."""
+
+
+@dataclass(frozen=True)
+class OneBotSendResult:
+    """Safe subset of a successful ``send_group_msg`` response."""
+
+    message_id: str | None
 
 
 class OneBotClient:
@@ -218,6 +230,43 @@ class OneBotClient:
         """Retrieve one forward bundle through NapCat's `get_forward_msg` action."""
 
         return await self.call_action("get_forward_msg", {"message_id": message_id})
+
+    async def send_group_message(
+        self,
+        group_id: str,
+        message: str,
+    ) -> OneBotSendResult:
+        """Send one text message to a group without retrying ambiguous failures."""
+
+        if not group_id:
+            raise ValueError("group_id must not be empty")
+        if not message:
+            raise ValueError("message must not be empty")
+        response = await self.call_action(
+            "send_group_msg",
+            {"group_id": group_id, "message": message},
+        )
+        status = response.get("status")
+        retcode = response.get("retcode")
+        if (
+            status != "ok"
+            or not isinstance(retcode, int)
+            or isinstance(retcode, bool)
+            or retcode != 0
+        ):
+            raise OneBotActionResponseError(
+                "OneBot send_group_msg returned a non-success response"
+            )
+
+        data = response.get("data")
+        message_id: str | None = None
+        if isinstance(data, Mapping):
+            raw_message_id = data.get("message_id")
+            if isinstance(raw_message_id, (str, int)) and not isinstance(
+                raw_message_id, bool
+            ):
+                message_id = str(raw_message_id)
+        return OneBotSendResult(message_id=message_id)
 
     async def _run_forever(self) -> None:
         delay = self._reconnect_initial_delay

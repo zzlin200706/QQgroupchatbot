@@ -6,6 +6,11 @@ from app.services.normalized_message_ingestion import (
 )
 from app.services.reference_enrichment import ReferenceEnrichmentService
 from app.services.summary import SummaryService, SummaryWindowTooLarge
+from app.services.summary_command import (
+    SummaryCommandHandler,
+    SummaryCommandStatus,
+    is_summary_command,
+)
 
 __all__ = [
     "ConversationQueryService",
@@ -13,4 +18,7 @@ __all__ = [
     "ReferenceEnrichmentService",
     "SummaryService",
     "SummaryWindowTooLarge",
+    "SummaryCommandHandler",
+    "SummaryCommandStatus",
+    "is_summary_command",
 ]

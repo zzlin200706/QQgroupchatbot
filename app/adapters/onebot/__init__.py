@@ -1,5 +1,9 @@
 """OneBot 11 transport adapter."""
 
-from app.adapters.onebot.client import OneBotClient
+from app.adapters.onebot.client import (
+    OneBotActionResponseError,
+    OneBotClient,
+    OneBotSendResult,
+)
 
-__all__ = ["OneBotClient"]
+__all__ = ["OneBotActionResponseError", "OneBotClient", "OneBotSendResult"]

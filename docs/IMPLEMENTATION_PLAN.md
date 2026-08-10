@@ -738,6 +738,79 @@ prompt_tokens, completion_tokens, total_tokens
 
 ---
 
+# Phase J — Manual Group Summary Command + OneBot Send
+
+## 架构与边界
+
+```text
+OneBot inbound group message
+  ↓ existing raw + normalized ingestion
+exact top-level #总结 command
+  ↓
+SummaryCommandHandler
+  ↓
+SummaryService → validated SummaryResult
+  ↓
+SummaryRepository.persist
+  ↓
+SummaryMessageFormatter
+  ↓
+OneBotClient.send_group_message → send_group_msg
+```
+
+本阶段只接通 OneBot/NapCat 的人工触发闭环。没有修改 SummaryService、DeepSeek prompt/retry/schema 或
+normalized storage 语义，也没有实现 scheduler、automatic summary、QA/RAG、embedding/vector DB、FastAPI
+summary endpoint、QQ Official outbound、chunk/map-reduce 或长消息拆分。
+
+## 命令与时间语义
+
+- 功能默认由 `SUMMARY_COMMAND_ENABLED=false` 关闭；人工启用后只接受去除前后空白后恰好为 `#总结`
+  的 direct top-level text-only message；不接受扩展参数、自然语言或内嵌文本；
+- forward/nested forward、resolved reply、image/file metadata 和 raw payload 中的 `#总结` 均不会触发；
+  handler 不遍历消息树，也不从 quoted/forward sender 推断触发者；
+- 只接受 `platform=onebot11`、`post_type=message`、`message_type=group` 且有明确 group id 和
+  timezone-aware timestamp 的 normalized direct event；`message_sent`、self actor、private/QQ Official、缺失
+  context 或不可信时间均拒绝，且不会调用 LLM；
+- 窗口为 `[command timestamp - SUMMARY_COMMAND_LOOKBACK_MINUTES, command timestamp)`，默认回看 120 分钟。
+  command 先走既有 raw/normalized persistence，再启动 summary；half-open end 保证命令自身不进入摘要；
+- `(platform, group_id)` 使用默认 60 秒的 in-memory cooldown，并以同 key active set 原子 claim，防止同群
+  并发生成两次。cooldown 不持久化，也不引入 Redis/distributed lock。
+
+## Outbound、顺序与失败语义
+
+- `SummaryMessageFormatter` 是纯 presentation，只输出非空的摘要、话题、关键内容、决定、待办和未解决问题；
+  nullable owner/deadline 显示为“未知”，不再次推断、不调用 LLM、不截断；
+- 根据当前 NapCat 文档，`OneBotClient.send_group_message` 复用现有 WebSocket action/echo correlation，发送
+  `send_group_msg(group_id, message)`，并要求响应 `status=ok, retcode=0`；明确存在的 `data.message_id` 才作为
+  optional safe result 返回；
+- send timeout/non-success 不自动 retry，避免 action 实际成功但 response 丢失时重复发群；
+- 固定顺序为 generation → persist → format → send。generation failure 不 persist/send；persist failure 不
+  send；send failure 保留已写入历史摘要，不删除、不重新调用 provider；empty result 仍可正常保存与发送；
+- live adapter 在 authoritative ingestion 完成后才创建受跟踪的 command task，使 receive loop 能继续接收同一
+  WebSocket 上的 action echo。handler/后台任务异常不会回滚已入库消息或终止后续收包；shutdown 会取消并
+  收拢剩余 command tasks，再关闭 application-owned provider；
+- 日志仅记录 detected/generated/persisted/send success/failure 和 exception type，不记录 group/user id、摘要、
+  conversation、prompt、provider body、raw payload、Authorization 或 API key。
+
+官方资料（核对日期 2026-08-10）：
+
+- https://napneko.github.io/onebot/network
+- https://napneko.github.io/onebot/api
+- https://napneko.github.io/onebot/basic_event
+
+## 已验证范围
+
+- exact/trimmed command 与所有非精确形式；forward/nested/reply/image/file/provenance 非 direct 内容不误触发；
+- inbound group context、missing group/time、naive time、private、QQ Official、message_sent 与 self guard；
+- default-disabled configuration、120-minute window、per-group cooldown、cooldown expiry 和 concurrent single-flight；
+- formatter 全 section、空 section、nullable owner/deadline 和不截断；
+- send_group_msg action/params/echo、success/message id、non-success 与 timeout no-retry；
+- generate/persist/send 调用顺序、generation/persistence/send failure 边界；
+- 全离线 fake OneBot event → raw/normalized DB → query/render → FakeLLMProvider → validated result → summaries
+  SQLite → formatted fake OneBot send 闭环，command 本身不进入 provider prompt；自动测试不连接 DeepSeek/NapCat。
+
+---
+
 # Phase 6 — 合并转发
 
 这是核心 Phase，不允许跳过测试。

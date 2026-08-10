@@ -1,5 +1,6 @@
 """FastAPI application entry point."""
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -11,12 +12,18 @@ from pydantic import BaseModel
 
 from app.adapters.onebot.client import OneBotClient
 from app.config import Settings, get_settings
+from app.llm.providers import DeepSeekProvider
 from app.parsers.onebot_message_parser import OneBotMessageParser
+from app.rendering import MessageRenderer, SummaryMessageFormatter
+from app.services.conversation_query import ConversationQueryService
 from app.services.normalized_message_ingestion import NormalizedMessageIngestionService
 from app.services.raw_event_ingestion import RawEventIngestionService
+from app.services.summary import SummaryService
+from app.services.summary_command import SummaryCommandHandler, is_summary_command
 from app.storage.database import Database
 from app.storage.message_repository import MessageRepository
 from app.storage.raw_event_repository import RawEventRepository
+from app.storage.summary_repository import SummaryRepository
 
 
 logger = logging.getLogger(__name__)
@@ -48,6 +55,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 max_message_segments=app_settings.message_max_segments,
             ),
         )
+        summary_repository = SummaryRepository(database.session_factory)
+        summary_command_handler: SummaryCommandHandler | None = None
+        deepseek_provider: DeepSeekProvider | None = None
+        command_tasks: set[asyncio.Task[object]] = set()
+
+        def command_task_finished(task: asyncio.Task[object]) -> None:
+            command_tasks.discard(task)
+            if task.cancelled():
+                return
+            error = task.exception()
+            if error is not None:
+                logger.error(
+                    "summary command task failed error_type=%s",
+                    type(error).__name__,
+                )
 
         async def ingest_onebot_event(event: dict[str, object]) -> None:
             persisted = await raw_ingestion_service.ingest(event)
@@ -66,6 +88,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         persisted.id,
                         normalized.platform,
                     )
+                    if (
+                        summary_command_handler is not None
+                        and is_summary_command(normalized)
+                    ):
+                        task = asyncio.create_task(
+                            summary_command_handler.handle(
+                                normalized,
+                                post_type=_scalar_string(event.get("post_type")),
+                                self_id=_scalar_string(event.get("self_id")),
+                            ),
+                            name="onebot-summary-command",
+                        )
+                        command_tasks.add(task)
+                        task.add_done_callback(command_task_finished)
 
         client = OneBotClient(
             url=app_settings.onebot_ws_url,
@@ -76,17 +112,50 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             reconnect_initial_delay=app_settings.onebot_reconnect_initial_delay_seconds,
             reconnect_max_delay=app_settings.onebot_reconnect_max_delay_seconds,
         )
+        if app_settings.summary_command_enabled:
+            deepseek_provider = DeepSeekProvider(
+                api_key=app_settings.deepseek_api_key.get_secret_value(),
+                base_url=app_settings.deepseek_base_url,
+                model=app_settings.deepseek_model,
+                timeout_seconds=app_settings.deepseek_timeout_seconds,
+                max_retries=app_settings.deepseek_max_retries,
+            )
+            summary_service = SummaryService(
+                query_service=ConversationQueryService(message_repository),
+                renderer=MessageRenderer(),
+                provider=deepseek_provider,
+                max_messages=app_settings.summary_max_messages,
+                max_input_chars=app_settings.summary_max_input_chars,
+                max_output_tokens=app_settings.deepseek_max_output_tokens,
+            )
+            summary_command_handler = SummaryCommandHandler(
+                summary_service=summary_service,
+                summary_repository=summary_repository,
+                formatter=SummaryMessageFormatter(),
+                sender=client,
+                enabled=True,
+                lookback_minutes=app_settings.summary_command_lookback_minutes,
+                cooldown_seconds=app_settings.summary_command_cooldown_seconds,
+            )
         application.state.database = database
         application.state.raw_event_repository = raw_repository
         application.state.raw_event_ingestion_service = raw_ingestion_service
         application.state.message_repository = message_repository
         application.state.normalized_message_ingestion_service = normalized_ingestion_service
+        application.state.summary_repository = summary_repository
+        application.state.summary_command_handler = summary_command_handler
         application.state.onebot_client = client
         await client.start()
         try:
             yield
         finally:
             await client.stop()
+            for task in tuple(command_tasks):
+                task.cancel()
+            if command_tasks:
+                await asyncio.gather(*command_tasks, return_exceptions=True)
+            if deepseek_provider is not None:
+                await deepseek_provider.aclose()
             await database.dispose()
 
     application = FastAPI(
@@ -104,6 +173,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     return application
+
+
+def _scalar_string(value: object) -> str | None:
+    if value is None or isinstance(value, (bool, dict, list)):
+        return None
+    if isinstance(value, (str, int, float)):
+        return str(value)
+    return None
 
 
 app = create_app()

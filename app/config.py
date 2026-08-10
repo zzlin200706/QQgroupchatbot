@@ -33,6 +33,9 @@ class Settings(BaseSettings):
 
     summary_max_messages: int = Field(default=500, ge=1)
     summary_max_input_chars: int = Field(default=120000, ge=1)
+    summary_command_enabled: bool = False
+    summary_command_lookback_minutes: int = Field(default=120, ge=1)
+    summary_command_cooldown_seconds: int = Field(default=60, ge=0)
 
     forward_max_depth: int = Field(default=10, ge=1)
     forward_max_nodes: int = Field(default=500, ge=1)
