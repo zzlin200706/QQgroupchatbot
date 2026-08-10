@@ -665,6 +665,79 @@ persistence。LLM 只接收 Renderer 输出，不读取 ORM、raw event、segmen
 
 ---
 
+# Phase I — Summary Persistence + Historical Query
+
+## 架构与边界
+
+```text
+SummaryService
+  ↓
+validated SummaryResult
+  ↓ explicit caller boundary
+SummaryRepository
+  ↓
+summaries
+  ↓
+StoredSummary(id, created_at, result)
+```
+
+Generation 与 persistence 保持独立。`SummaryService` 继续只负责 query、render、provider invocation、
+validation 和返回 `SummaryResult`；它不依赖 SQLAlchemy、session、ORM 或 repository。调用方只有在获得
+成功且已验证的 result 后，才显式调用 `SummaryRepository.persist(result)`。
+
+本阶段没有修改 DeepSeek prompt/retry/privacy，也没有实现 QQ send、bot command、scheduler、QA、RAG、
+embedding、vector DB、FastAPI summary endpoint、Web UI、自动触发、chunk/map-reduce summary、图片理解或
+新 provider。
+
+## summaries schema
+
+`summaries` 每行代表一次独立的成功生成运行：
+
+```text
+id, platform, group_id, start_time, end_time, message_count, created_at
+summary, topics, key_points, decisions, action_items, open_questions
+provider, model, finish_reason, input_chars, prompt_version
+prompt_tokens, completion_tokens, total_tokens
+```
+
+- `id` 为本地自增主键；`created_at` 由 repository 的 UTC clock 生成；start/end/created 使用既有
+  `UTCDateTime`，SQLite round-trip 后均为 timezone-aware UTC；
+- topics/key points/decisions/action items/open questions 使用 JSON array，不拼接为逗号文本；action item
+  明确保留 description/owner/deadline，nullable 值仍为 JSON null / Python `None`；
+- optional token usage 使用 nullable integer，未知值保持 SQL NULL / Python `None`，不填零；
+- 索引为 `(platform, group_id, start_time, end_time)` 与
+  `(platform, group_id, created_at)`；window 没有 unique constraint；
+- 不保存 raw payload/data、rendered conversation、system/user prompt、provider response body、Authorization、
+  API key、attachment URL/path、QQ identity、Gateway/OneBot JSON 或 `REFIDX`。
+
+## Codec、transaction 与历史语义
+
+- `summary_codec` 显式执行 `SummaryResult ↔ SummaryRecord`，并把 database identity 包装在独立 immutable
+  `StoredSummary(id, created_at, result)`；`SummaryResult` 本身没有 database id、ORM record 或 session；
+- decode 对 JSON array、string item 和 action item exact shape 做防御校验，不静默转换损坏数据；
+- persist 在单一 transaction 中 insert/flush/refresh。任何 SQL/JSON serialization failure 自动 rollback 并
+  向上传播，不吞异常、不返回伪成功；
+- 每次 persist 都 insert 新 row。同一 platform/group/window 的多次运行不会覆盖或去重，便于比较不同
+  prompt/model/provider/message representation；
+- `get_by_id` 返回单条；`list_for_group(platform, group_id, limit=100)` 严格隔离平台与群，并固定按
+  `created_at DESC, id DESC` 返回。非正 limit、空 platform/group 会明确拒绝；
+- empty-window `SummaryResult` 与其他已验证 result 一样可由调用方显式保存；repository 不根据
+  `message_count` 猜业务意图；
+- LLM/validation/overflow failure 不会产生 result，因此 generation failure 路径不会插入 summaries row。
+
+## 已验证范围
+
+- 全字段 persist/get round-trip、structured tuple 顺序、action items（含 nullable owner/deadline）；
+- usage 完整缺失、全部存在与部分 nullable，均不伪造零值；
+- 同 window 多 run 获得不同 id，created-at/id newest-first 稳定排序，history limit 生效；
+- group isolation 与相同 group string 的 cross-platform isolation；
+- start/end/created 的 timezone-aware UTC round-trip、transaction rollback 与 privacy-only column allowlist；
+- OneBot 脱敏 fixture 完成 raw → parser → normalized DB → query → renderer → SummaryService → FakeLLMProvider
+  → SummaryRepository → SQLite → get/list 的完整链路；synthetic provider failure 后 summaries row count 为零；
+- schema 继续由现有 `Base.metadata.create_all` 初始化，未引入 Alembic 或新的基础设施。
+
+---
+
 # Phase 6 — 合并转发
 
 这是核心 Phase，不允许跳过测试。

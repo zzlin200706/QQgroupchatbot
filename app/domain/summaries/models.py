@@ -34,3 +34,12 @@ class SummaryResult:
     prompt_tokens: int | None
     completion_tokens: int | None
     total_tokens: int | None
+
+
+@dataclass(frozen=True)
+class StoredSummary:
+    """A persisted summary plus storage-generated identity and timestamp."""
+
+    id: int
+    created_at: datetime
+    result: SummaryResult

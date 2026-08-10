@@ -1,11 +1,11 @@
-"""ORM models for authoritative raw receipts and normalized message trees."""
+"""ORM models for raw receipts, normalized message trees, and summaries."""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, JSON, String, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.types import TypeDecorator
 
@@ -181,3 +181,51 @@ class MessageNodeRecord(Base):
         back_populates="parent",
         foreign_keys=[parent_node_id],
     )
+
+
+class SummaryRecord(Base):
+    """One immutable historical run produced from a validated SummaryResult."""
+
+    __tablename__ = "summaries"
+    __table_args__ = (
+        Index(
+            "ix_summaries_platform_group_window",
+            "platform",
+            "group_id",
+            "start_time",
+            "end_time",
+        ),
+        Index(
+            "ix_summaries_platform_group_created_at",
+            "platform",
+            "group_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    platform: Mapped[str] = mapped_column(String(32), nullable=False)
+    group_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    start_time: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    end_time: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    message_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    topics: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    key_points: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    decisions: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    action_items: Mapped[list[dict[str, str | None]]] = mapped_column(
+        JSON,
+        nullable=False,
+    )
+    open_questions: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    model: Mapped[str] = mapped_column(String(128), nullable=False)
+    finish_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    input_chars: Mapped[int] = mapped_column(Integer, nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
