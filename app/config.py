@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     onebot_reconnect_initial_delay_seconds: float = Field(default=1.0, gt=0)
     onebot_reconnect_max_delay_seconds: float = Field(default=30.0, gt=0)
 
+    qq_bot_app_id: str = ""
+    qq_bot_app_secret: str = ""
+
     database_url: str = "sqlite+aiosqlite:///./data/qqgroupchatbot.db"
 
     forward_max_depth: int = Field(default=10, ge=1)
