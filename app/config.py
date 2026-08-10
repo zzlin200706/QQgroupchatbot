@@ -14,6 +14,10 @@ class Settings(BaseSettings):
 
     onebot_ws_url: str = "ws://127.0.0.1:3001"
     onebot_access_token: str = ""
+    onebot_connect_timeout_seconds: float = Field(default=10.0, gt=0)
+    onebot_action_timeout_seconds: float = Field(default=10.0, gt=0)
+    onebot_reconnect_initial_delay_seconds: float = Field(default=1.0, gt=0)
+    onebot_reconnect_max_delay_seconds: float = Field(default=30.0, gt=0)
 
     database_url: str = "sqlite+aiosqlite:///./data/qqgroupchatbot.db"
 

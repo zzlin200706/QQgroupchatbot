@@ -1,5 +1,6 @@
 import httpx
 import pytest
+import websockets
 
 from app.config import Settings
 from app.main import create_app
@@ -19,3 +20,27 @@ async def test_health_reports_application_status() -> None:
         "app": "qqgroupchatbot",
         "environment": "test",
     }
+
+
+@pytest.mark.asyncio
+async def test_lifespan_starts_and_stops_onebot_client() -> None:
+    async def handler(connection: websockets.ServerConnection) -> None:
+        await connection.wait_closed()
+
+    async with websockets.serve(handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        app = create_app(
+            Settings(
+                app_env="test",
+                onebot_ws_url=f"ws://127.0.0.1:{port}",
+                onebot_reconnect_initial_delay_seconds=0.01,
+                onebot_reconnect_max_delay_seconds=0.02,
+            )
+        )
+
+        async with app.router.lifespan_context(app):
+            client = app.state.onebot_client
+            await client.wait_until_connected(timeout=1)
+            assert client.is_connected
+
+        assert not client.is_connected

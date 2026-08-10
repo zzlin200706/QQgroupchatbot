@@ -192,11 +192,30 @@ group_id=...
 
 ## 完成标准
 
-- [ ] WS 连通；
-- [ ] 群普通消息事件可收到；
-- [ ] 断开 NapCat 后后端不会退出；
-- [ ] NapCat 恢复后自动重连；
-- [ ] 可以调用一个无风险 OneBot action，例如 get_status/get_login_info（参数以当前文档为准）。
+- [x] WS 连通；
+- [x] 群普通消息事件可收到；
+- [x] 断开 NapCat 后后端不会退出；
+- [x] NapCat 恢复后自动重连；
+- [x] 可以调用一个无风险 OneBot action，例如 get_status/get_login_info（参数以当前文档为准）。
+
+## 联调记录（2026-08-10）
+
+- 本机 NapCat 正向 WebSocket 已通过 `OneBotClient` 连接；Access Token 只从本地
+  `.env` 读取，未打印或写入仓库。
+- `get_status` 与 `get_login_info` 均返回 `status=ok`、`retcode=0`，响应的 `echo`
+  与请求正确关联。
+- 真实群文本事件已进入 adapter 的普通业务事件回调；收到的 meta event 被 adapter
+  拦截，未进入该回调。
+- `tests/fixtures/onebot/real_group_text_sanitized.json` 保留真实事件的 OneBot JSON
+  形状，同时替换账号、群、消息、序列、名称、文本与 URL/路径字段。它只用作后续
+  normalizer/parser 的输入 fixture，尚未实现消息解析或持久化。
+- 自动重连、断线时 pending action 失败、以及 FastAPI lifespan 启停均由本地 WebSocket
+  模拟测试覆盖。
+- 已完成真实 NapCat WebSocket 服务端关闭/恢复演练：adapter 检测到远端断开，保持
+  FastAPI lifespan 进程存活并按指数退避重试，观察到至少两次真实连接失败。服务端恢复
+  后没有重启 qqgroupchatbot 或调用客户端 `disconnect()`，adapter 自动重新连接；
+  `get_status` 再次返回 `status=ok`、`retcode=0`，且 `echo` 正常关联。恢复后真实群
+  文本事件仍进入业务回调，收到的 heartbeat/lifecycle meta event 继续被拦截。
 
 ---
 
