@@ -1,0 +1,1 @@
+"""qqgroupchatbot application package."""
