@@ -209,6 +209,16 @@ class OneBotClient:
         finally:
             self._pending_actions.pop(echo, None)
 
+    async def get_message(self, message_id: str | int) -> dict[str, object]:
+        """Retrieve one message through the documented OneBot `get_msg` action."""
+
+        return await self.call_action("get_msg", {"message_id": message_id})
+
+    async def get_forward_message(self, message_id: str) -> dict[str, object]:
+        """Retrieve one forward bundle through NapCat's `get_forward_msg` action."""
+
+        return await self.call_action("get_forward_msg", {"message_id": message_id})
+
     async def _run_forever(self) -> None:
         delay = self._reconnect_initial_delay
 

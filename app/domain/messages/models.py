@@ -44,6 +44,7 @@ class ProvenanceSource(str, Enum):
     """The source context for a message or a forward node."""
 
     DIRECT_EVENT = "direct_event"
+    RESOLVED_REFERENCE = "resolved_reference"
     FORWARD_NODE = "forward_node"
     NESTED_FORWARD_NODE = "nested_forward_node"
 

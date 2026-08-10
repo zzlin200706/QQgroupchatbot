@@ -16,7 +16,9 @@ from app.domain.messages.segments import (
     ForwardResolutionStatus,
     ForwardSegment,
     ImageSegment,
+    ReplyResolutionStatus,
     ReplySegment,
+    ResolvedMessageReference,
     TextSegment,
     UnknownSegment,
 )
@@ -35,7 +37,9 @@ __all__ = [
     "MessageContext",
     "MessageProvenance",
     "ProvenanceSource",
+    "ReplyResolutionStatus",
     "ReplySegment",
+    "ResolvedMessageReference",
     "TextSegment",
     "UnknownSegment",
 ]

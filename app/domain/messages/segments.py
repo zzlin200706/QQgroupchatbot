@@ -38,9 +38,33 @@ class ImageSegment(Segment):
     file_size: int | None
 
 
+class ReplyResolutionStatus(str, Enum):
+    """The outcome of optional get_msg enrichment."""
+
+    UNRESOLVED = "unresolved"
+    RESOLVED = "resolved"
+    INVALID_REFERENCE = "invalid_reference"
+    FETCH_FAILED = "fetch_failed"
+    INVALID_RESPONSE = "invalid_response"
+
+
 @dataclass(frozen=True)
 class ReplySegment(Segment):
     referenced_message_id: str | None
+    resolution_status: ReplyResolutionStatus = ReplyResolutionStatus.UNRESOLVED
+    resolved_message: "ResolvedMessageReference | None" = None
+    resolved_raw_data: Any = None
+
+
+@dataclass(frozen=True)
+class ResolvedMessageReference:
+    """A get_msg result parsed without pretending it was a WebSocket event."""
+
+    platform_message_id: str | None
+    author: IdentityRef
+    timestamp: datetime | None
+    segments: tuple["MessageSegment", ...]
+    raw_data: Any
 
 
 @dataclass(frozen=True)
@@ -58,9 +82,13 @@ class ForwardResolutionStatus(str, Enum):
 
     UNRESOLVED = "unresolved"
     EMBEDDED = "embedded"
+    FETCHED = "fetched"
     INVALID_CONTENT = "invalid_content"
     DEPTH_LIMIT = "depth_limit"
     NODE_LIMIT = "node_limit"
+    INVALID_REFERENCE = "invalid_reference"
+    FETCH_FAILED = "fetch_failed"
+    INVALID_RESPONSE = "invalid_response"
 
 
 @dataclass(frozen=True)
@@ -81,6 +109,7 @@ class ForwardSegment(Segment):
     resolution_status: ForwardResolutionStatus
     content: tuple[MessageSegment, ...]
     nodes: tuple[ForwardNode, ...]
+    resolved_raw_data: Any = None
 
 
 @dataclass(frozen=True)

@@ -25,6 +25,8 @@ from app.domain.messages.segments import (
     ForwardSegment,
     ImageSegment,
     MessageSegment,
+    ResolvedMessageReference,
+    ReplyResolutionStatus,
     ReplySegment,
     TextSegment,
     UnknownSegment,
@@ -102,6 +104,59 @@ class OneBotMessageParser:
             timestamp=_timestamp(event.get("time")),
             segments=segments,
             provenance=provenance,
+        )
+
+    def parse_resolved_message_reference(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        source_raw_event_id: int | None,
+    ) -> ResolvedMessageReference | None:
+        """Parse a get_msg data object without inventing a message event wrapper."""
+
+        if not isinstance(payload.get("message"), list):
+            return None
+        reference = copy.deepcopy(dict(payload))
+        message_id = _as_string(reference.get("message_id"))
+        provenance = MessageProvenance(
+            source_type=ProvenanceSource.RESOLVED_REFERENCE,
+            raw_event_id=source_raw_event_id,
+            parent_message_id=message_id,
+        )
+        return ResolvedMessageReference(
+            platform_message_id=message_id,
+            author=_resolved_message_identity(reference),
+            timestamp=_timestamp(reference.get("time")),
+            segments=self._parse_message_segments(
+                reference.get("message"),
+                budget=_ParseBudget(),
+                provenance=provenance,
+                forward_depth=0,
+            ),
+            raw_data=reference,
+        )
+
+    def parse_forward_content(
+        self,
+        content: object,
+        *,
+        source_raw_event_id: int | None,
+        reference_id: str | None,
+    ) -> ForwardSegment:
+        """Parse already-fetched forward content without a further network call."""
+
+        provenance = MessageProvenance(
+            source_type=ProvenanceSource.RESOLVED_REFERENCE,
+            raw_event_id=source_raw_event_id,
+            parent_message_id=reference_id,
+        )
+        return self._parse_forward(
+            {"id": reference_id, "content": copy.deepcopy(content)},
+            raw_data=copy.deepcopy(content),
+            position=0,
+            budget=_ParseBudget(),
+            provenance=provenance,
+            forward_depth=0,
         )
 
     def _parse_message_segments(
@@ -188,6 +243,7 @@ class OneBotMessageParser:
             return ReplySegment(
                 position=position,
                 referenced_message_id=_as_string(mapping_data.get("id")),
+                resolution_status=ReplyResolutionStatus.UNRESOLVED,
                 raw_data=raw_data,
             )
         if segment_type == "file":
@@ -359,6 +415,20 @@ def _node_identity(node_data: Mapping[str, Any]) -> IdentityRef:
         display_name=_as_string(node_data.get("nickname")),
         card=_as_string(node_data.get("card")),
         source=(IdentitySource.FORWARD_NODE if user_id is not None else IdentitySource.UNKNOWN),
+        availability=(IdentityAvailability.KNOWN if user_id is not None else IdentityAvailability.UNAVAILABLE),
+    )
+
+
+def _resolved_message_identity(payload: Mapping[str, Any]) -> IdentityRef:
+    sender = payload.get("sender")
+    sender_data: Mapping[str, Any] = sender if isinstance(sender, Mapping) else {}
+    user_id = _as_string(payload.get("user_id"))
+    return IdentityRef(
+        platform="onebot11",
+        user_id=user_id,
+        display_name=_as_string(sender_data.get("nickname")),
+        card=_as_string(sender_data.get("card")),
+        source=(IdentitySource.RESOLVED_MESSAGE if user_id is not None else IdentitySource.UNKNOWN),
         availability=(IdentityAvailability.KNOWN if user_id is not None else IdentityAvailability.UNAVAILABLE),
     )
 

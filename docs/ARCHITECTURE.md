@@ -26,7 +26,7 @@
                 ▼
 ┌──────────────────────────────┐
 │ Message Parser               │
-│ recursive forward resolver   │
+│ pure raw-data parsing        │
 └───────────────┬──────────────┘
                 ▼
 ┌──────────────────────────────┐
@@ -155,33 +155,38 @@ Normalizer 不应该递归请求 forward 内容。
 
 ---
 
-## 5. Message Parser
+## 5. Message Parser and Reference Enrichment
 
 建议主接口：
 
 ```python
-async def parse_message(
-    event: NormalizedEvent,
-    context: ParseContext,
-) -> Message
+def parse_message(
+    raw_event: dict,
+    *,
+    raw_event_id: int | None,
+) -> InternalMessage | None
 ```
 
-其中 `ParseContext` 持有：
+Parser 是 raw-data-first 的纯解析层：不访问 WebSocket、不调用 OneBot action、不写数据库，输入也不
+会被修改。它可保留 embedded forward 的递归树，但只有 forward id 时保持 unresolved。
+
+可选的后续 enrichment 才通过 adapter action 补全 reference：
 
 ```text
-depth
-visited_forward_ids
-limits
+InternalMessage
+  ↓
+ReferenceEnrichmentService
+  ├─ reply id   → get_msg
+  └─ forward id → get_forward_msg
 ```
 
-forward 解析：
+enrichment 返回新对象，并保留原对象的 raw data。它不在收包 callback 中执行。本阶段只补全直接
+unresolved reference；nested unresolved forward 的网络递归、循环检测及 traversal 留给后续 Phase 6。
 
-```python
-parse_forward_segment()
-    -> resolve_forward_if_needed()
-        -> parse_forward_nodes()
-            -> parse_each_node_message()
-                -> parse_nested_forward()
+```text
+forward event content present → parser marks embedded
+forward id only             → parser marks unresolved
+optional get_forward_msg    → enrichment marks fetched or a safe failure status
 ```
 
 ---

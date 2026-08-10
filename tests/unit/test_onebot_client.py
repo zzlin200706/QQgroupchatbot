@@ -102,6 +102,54 @@ async def test_correlates_concurrent_action_responses_by_echo() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reference_action_helpers_use_documented_actions_and_parameters() -> None:
+    received_requests: list[dict[str, object]] = []
+
+    async def handler(connection: websockets.ServerConnection) -> None:
+        for _ in range(2):
+            request = json.loads(await connection.recv())
+            received_requests.append(request)
+            await connection.send(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "retcode": 0,
+                        "data": {},
+                        "echo": request["echo"],
+                    }
+                )
+            )
+        await connection.wait_closed()
+
+    async with websockets.serve(handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        client = OneBotClient(
+            url=f"ws://127.0.0.1:{port}",
+            reconnect_initial_delay=0.01,
+            reconnect_max_delay=0.02,
+        )
+        await client.start()
+        await client.wait_until_connected(timeout=1)
+
+        await client.get_message("message-123")
+        await client.get_forward_message("forward-456")
+
+        assert received_requests == [
+            {
+                "action": "get_msg",
+                "params": {"message_id": "message-123"},
+                "echo": received_requests[0]["echo"],
+            },
+            {
+                "action": "get_forward_msg",
+                "params": {"message_id": "forward-456"},
+                "echo": received_requests[1]["echo"],
+            },
+        ]
+        await client.stop()
+
+
+@pytest.mark.asyncio
 async def test_action_timeout_is_reported() -> None:
     received_action = asyncio.Event()
 

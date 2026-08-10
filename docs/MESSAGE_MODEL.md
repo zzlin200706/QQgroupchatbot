@@ -148,7 +148,8 @@ data = {
 kind = reply
 data = {
   "reply_to_platform_message_id": ...,
-  "resolution_status": "not_requested" | "resolved" | "unavailable" | "error"
+  "resolution_status": "unresolved" | "resolved" | "invalid_reference" |
+                       "fetch_failed" | "invalid_response"
 }
 children = [
   可选的 resolved quoted message
@@ -208,7 +209,9 @@ data = {
 kind = forward
 data = {
   "forward_id": ...,
-  "resolution_status": "embedded" | "resolved" | "unavailable" | "error" | "depth_limit"
+  "resolution_status": "unresolved" | "embedded" | "fetched" |
+                       "invalid_reference" | "fetch_failed" | "invalid_response" |
+                       "depth_limit"
 }
 children = [
   ForwardNode,
@@ -248,7 +251,19 @@ author = IdentityRef(
 
 ---
 
-## 12. 例子：嵌套转发
+## 12. Reference enrichment
+
+`ReplySegment` 可在纯 parser 之后由 `get_msg` 补全为独立的 resolved-message reference；它保留
+platform message id、author、timestamp、segments 和来自 action response 的单独 raw data。该 author
+只能来自 resolved message 自身明确提供的字段，不能继承当前消息发送者。
+
+`ForwardSegment` 的事件 raw data 与远端 `get_forward_msg` response data 分开保存。已 embedded 的
+forward 不重复请求网络。单次 enrichment 对相同 reference id 做内存 cache；不做 nested unresolved
+forward 的递归网络获取。
+
+---
+
+## 13. 例子：嵌套转发
 
 群内实际事件：
 

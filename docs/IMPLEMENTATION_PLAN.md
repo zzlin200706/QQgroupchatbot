@@ -386,8 +386,72 @@ NapCat 当前文档确认 text、at、reply、image、file 与 forward 的上述
 
 # Phase 5 — Reference Enrichment
 
-reply/forward 的网络 resolution 属于后续 enrichment：可选调用 `get_msg` 或
-`get_forward_msg`，但必须保持当前 parser 的 raw-data-first、作者不猜测和树结构原则。
+## 架构与边界
+
+```text
+RawEvent.raw_payload + raw_events.id
+  ↓
+OneBotMessageParser (pure; no network)
+  ↓
+InternalMessage
+  ↓
+ReferenceEnrichmentService (optional, in-memory)
+  ├─ ReplySegment → OneBotClient.get_message() → get_msg
+  └─ unresolved ForwardSegment → OneBotClient.get_forward_message() → get_forward_msg
+```
+
+`ReferenceEnrichmentService` 返回新的 frozen `InternalMessage`；不会修改输入对象、
+`raw_events` 或 parser 生成的 `raw_data`。网络失败只更新相应 reference 的 resolution status，
+原始引用及原始 payload 始终保留。本阶段不接入 receive loop，因此 action 不会阻塞 WebSocket 收包。
+
+## 实现
+
+- `OneBotClient` 增加 `get_message(message_id)` 与 `get_forward_message(message_id)`；分别封装
+  NapCat 文档列出的 `get_msg(message_id: number/string)` 与 `get_forward_msg(message_id: string)`。
+- `ReplySegment` 的状态为 `unresolved`、`resolved`、`invalid_reference`、`fetch_failed` 或
+  `invalid_response`。成功时使用 `ResolvedMessageReference` 保存 get_msg 数据中明确给出的 message
+  id、author、timestamp、保序 segments 和单独的 raw data。
+- resolved reply 的 author 只从 get_msg 返回消息自身的 top-level `user_id`/`sender` 提取；缺少
+  `user_id` 时为 `availability=unavailable`、`source=unknown`，绝不继承当前消息 actor/author。
+- forward 的来源状态区分 `embedded`（事件本身已有 content）与 `fetched`（get_forward_msg 返回）。
+  远端内容仅写入 `resolved_raw_data`；原 `ForwardSegment.raw_data` 和各 `ForwardNode.raw_data`
+  保持事件中的原始内容。
+- 当前实现以实际/测试确认的 response data `messages` list 作为可解析 forward tree；其他形状安全
+  标记为 `invalid_response`，不会猜测字段或扁平化树。真实 NapCat forward smoke 用于确认当前运行版本
+  的 response shape。
+- 单次 `enrich()` 使用仅存活于此次调用的 reply/forward cache；重复 reference id 不重复 action。
+  只解析 response 中已嵌入的 nested content；nested unresolved forward 不继续网络请求，完整递归
+  网络解析明确留给 Phase 6。
+
+## 失败与隐私
+
+`OneBotClientError`（包括 timeout、断开）、非 `ok`/非零 retcode 及 malformed response 均安全降级为
+`fetch_failed` 或 `invalid_response`。日志只含 reference type、resolution 和 exception type，不记录
+消息正文、身份字段、URL 或凭据。
+
+## 测试与真实 smoke
+
+- adapter fake-WebSocket 测试验证 helper action 与参数；
+- enrichment 单测验证 reply/forward 成功、身份独立性、缺失 sender、失败降级、未知 segment、树及
+  segment 顺序、raw-data-first、不变性、每次 enrich 的 cache，以及 nested unresolved forward 不跨入
+  Phase 6；
+- 真实 reply/forward smoke 仍需在测试群产生相应 reference event 后执行；届时只输出 resolution、
+  identity availability 与 node/segment 数量，并在确认后添加严格脱敏的 fixture（如实际 response
+  shape 与测试样本不同）。
+
+## 完成标准
+
+- [x] `get_msg` / `get_forward_msg` adapter helper；
+- [x] parser 保持无网络，独立 in-memory ReferenceEnrichmentService；
+- [x] reply/forward resolution status、raw-data-first 与 immutable enrichment；
+- [x] resolved reply author 只来自 resolved message；缺失 author 不继承 outer sender；
+- [x] unresolved forward 可获取、embedded forward 不重复请求、fetched/embedded 来源可区分；
+- [x] forward tree/node sender 独立，缺失 sender 保持 unavailable；
+- [x] failure、安全降级、per-call cache 与 Phase 6 network-recursion boundary；
+- [x] Phase 1–4 regression 与 Phase 5 单测通过；
+- [ ] 真实 NapCat reply smoke；
+- [ ] 真实 NapCat forward smoke / 当前 response shape fixture（如可取得）；
+- [ ] 本阶段最终 diff check 与验收。
 
 ---
 
