@@ -508,6 +508,74 @@ messages + message_nodes
 
 ---
 
+# Phase G — Conversation Query + Deterministic Message Renderer
+
+## 架构与边界
+
+```text
+messages + message_nodes
+  ↓
+MessageRepository.list_conversation
+  ↓
+ConversationQueryService
+  ↓
+Sequence[InternalMessage]
+  ↓
+MessageRenderer
+  ↓
+stable readable text
+```
+
+本阶段是 normalized storage 的只读 consumer，不是 AI Phase。查询不读取或现场重放
+`raw_events.raw_payload`；Renderer 不访问 ORM、数据库、adapter、HTTP 或文件系统，也不接入 LLM、
+summary、QA、embedding 或向量存储。
+
+## Conversation Query
+
+- conversation key 必须同时包含 `platform + group_id`，不建立 OneBot 与 QQ Official 的群映射；
+- 时间窗口为 timezone-aware 的 `[start_time, end_time)`；naive datetime、反向/空窗口均拒绝；
+- `timestamp IS NULL` 不进入历史窗口，且绝不使用 normalized `created_at` 代替发送时间；
+- 结果固定按 `timestamp ASC, messages.id ASC` 排序；默认 limit 500，硬上限 2000，返回窗口中最前面的
+  limit 条；
+- 默认先在每个 `source_raw_event_id` 中选最大 `messages.id`，再应用 conversation/time filter。只传
+  `parser_name` 时在该 parser scope 内选最新写入表示；同时传 parser name/version 时精确选择该版本；
+  `parser_version` 不允许脱离 `parser_name` 单独使用；
+- replay 新旧不根据 parser-version 字符串排序。不同 raw receipts 即使拥有相同
+  `platform_message_id` 也保留为两条，不做 heuristic dedup；
+- repository 批量读取所选 message 的 node rows，再由既有 `message_codec.decode_message` 返回完整
+  `InternalMessage`，ORM 不泄露给 service/renderer。
+
+## Deterministic Renderer
+
+- 顶层格式为 `[ISO 8601 timestamp] author: content`，默认显示 UTC，可显式传展示 timezone；多行正文的
+  continuation 与消息边界使用固定缩进；
+- KNOWN identity 按 card、display name、`已知用户` 的顺序显示；UNKNOWN 显示 `[作者未知]`；
+  UNAVAILABLE 显示 `[原作者不可用]`，且 forward node 永不继承 outer author；
+- mention 只在当前 conversation 的 identity snapshots 中按相同 platform 和精确 user id 匹配名称；
+  未匹配显示 `@用户`，默认不显示裸 ID；
+- text、at、image、file、reply、unknown 按 position（相同 position 保留 tuple 顺序）渲染。图片和文件只
+  输出安全占位与可用 summary/name；unresolved reply 默认隐藏 platform id；resolved reply 的 quoted
+  author 和内容只来自 resolved reference；
+- unresolved forward 显示 `[合并转发：内容未解析]`。resolved forward 保留缩进 node tree；nested
+  forward 递归显示；`ForwardSegment.content` 作为 loose content 单独标注，绝不与 `nodes` 合并；
+- QQ Official 102 保持 unresolved/empty nodes，不解析展示文本或猜 sender；103 的 `REFIDX_*` 只留在
+  raw data，不成为 reply message id；
+- 默认输出不包含 raw/resolved raw data、attachment URL/path/platform file id、裸 QQ/OpenID 或 Gateway /
+  OneBot JSON；可选 `max_chars` 截断会追加 `[内容已截断]`，不会静默丢内容。
+
+## 已验证范围
+
+- half-open range、timezone validation、NULL timestamp、stable tie-break、limit，以及 cross-group /
+  cross-platform isolation；
+- default replay latest、parser-name latest、exact parser version，以及不同 raw receipts 的相同 platform
+  message id 均保留；
+- text/multiline、at、image、file、unknown、unresolved/resolved reply、unresolved/resolved/nested forward、
+  content/nodes 分离、unknown/unavailable identity、privacy 和 explicit truncation；
+- OneBot 与 QQ Official 的真实脱敏 fixture 均完成 raw fixture → parser → normalized persistence → query →
+  renderer 集成链路。
+
+---
+
 # Phase 6 — 合并转发
 
 这是核心 Phase，不允许跳过测试。

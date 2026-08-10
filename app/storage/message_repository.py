@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from collections import defaultdict
+from collections.abc import Sequence
+from datetime import datetime
+
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -78,6 +82,70 @@ class MessageRepository:
                 statement = statement.where(MessageRecord.parser_version == parser_version)
             record = await session.scalar(statement.order_by(MessageRecord.id.desc()).limit(1))
             return None if record is None else await self._decode(session, record)
+
+    async def list_conversation(
+        self,
+        *,
+        platform: str,
+        group_id: str,
+        start_time: datetime,
+        end_time: datetime,
+        limit: int,
+        parser_name: str | None = None,
+        parser_version: str | None = None,
+    ) -> Sequence[InternalMessage]:
+        """Decode a stable time window from normalized storage only.
+
+        Selection happens before the conversation filters: for every raw
+        receipt, the greatest normalized ``messages.id`` is authoritative in
+        the requested parser scope. This prevents an older replay version from
+        resurfacing merely because the latest representation changed a field.
+        """
+
+        candidates = select(
+            MessageRecord.source_raw_event_id,
+            func.max(MessageRecord.id).label("latest_id"),
+        )
+        if parser_name is not None:
+            candidates = candidates.where(MessageRecord.parser_name == parser_name)
+        if parser_version is not None:
+            candidates = candidates.where(MessageRecord.parser_version == parser_version)
+        latest_per_receipt = candidates.group_by(
+            MessageRecord.source_raw_event_id
+        ).subquery()
+
+        statement = (
+            select(MessageRecord)
+            .join(latest_per_receipt, MessageRecord.id == latest_per_receipt.c.latest_id)
+            .where(
+                MessageRecord.platform == platform,
+                MessageRecord.group_id == group_id,
+                MessageRecord.timestamp.is_not(None),
+                MessageRecord.timestamp >= start_time,
+                MessageRecord.timestamp < end_time,
+            )
+            .order_by(MessageRecord.timestamp.asc(), MessageRecord.id.asc())
+            .limit(limit)
+        )
+        async with self._session_factory() as session:
+            records = list((await session.scalars(statement)).all())
+            if not records:
+                return ()
+            record_ids = [record.id for record in records]
+            nodes = (
+                await session.scalars(
+                    select(MessageNodeRecord).where(
+                        MessageNodeRecord.message_id.in_(record_ids)
+                    )
+                )
+            ).all()
+            nodes_by_message_id: dict[int, list[MessageNodeRecord]] = defaultdict(list)
+            for node in nodes:
+                nodes_by_message_id[node.message_id].append(node)
+            return tuple(
+                decode_message(record, nodes_by_message_id[record.id])
+                for record in records
+            )
 
     async def _find_version(
         self,
