@@ -14,6 +14,7 @@ from app.domain.messages import (
     MessageContext,
     MessageProvenance,
     ProvenanceSource,
+    ReplySegment,
     TextSegment,
 )
 from app.services.group_assistant_handler import (
@@ -29,6 +30,8 @@ def message(
     *,
     message_id: str = "trigger-1",
     user_id: str = "user-a",
+    reply_reference_key: str | None = None,
+    sub_type: str = "GROUP_MESSAGE_CREATE",
 ) -> InternalMessage:
     actor = IdentityRef(
         platform="qq_official",
@@ -38,19 +41,32 @@ def message(
         source=IdentitySource.EVENT,
         availability=IdentityAvailability.KNOWN,
     )
+    segments = []
+    if reply_reference_key is not None:
+        segments.append(
+            ReplySegment(
+                position=0,
+                raw_data={"msg_idx": reply_reference_key},
+                referenced_message_id=None,
+                reference_key=reply_reference_key,
+            )
+        )
+    segments.append(
+        TextSegment(position=len(segments), raw_data=text, text=text)
+    )
     return InternalMessage(
         platform="qq_official",
         source_raw_event_id=1,
         platform_message_id=message_id,
         context=MessageContext(
-            message_type="0",
-            sub_type="GROUP_MESSAGE_CREATE",
+            message_type="103" if reply_reference_key is not None else "0",
+            sub_type=sub_type,
             group_id="group-a",
         ),
         actor=actor,
         author=actor,
         timestamp=datetime(2026, 8, 11, 12, tzinfo=timezone.utc),
-        segments=(TextSegment(position=0, raw_data=text, text=text),),
+        segments=tuple(segments),
         provenance=MessageProvenance(
             source_type=ProvenanceSource.DIRECT_EVENT,
             raw_event_id=1,
@@ -259,3 +275,36 @@ async def test_cooldown_is_per_requester_not_whole_group() -> None:
     assert first_b is GroupAssistantStatus.SUCCEEDED
     assert second_a is GroupAssistantStatus.COOLDOWN
     assert len(service.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_reply_without_explicit_trigger_never_claims_or_calls_llm() -> None:
+    service = FakeService()
+    repository = FakeRepository()
+    sender = FakeSender()
+
+    status = await handler(service, repository, sender).handle(
+        message("那多进程呢？", reply_reference_key="REFIDX_QUOTED")
+    )
+
+    assert status is GroupAssistantStatus.NOT_TRIGGER
+    assert service.calls == []
+    assert sender.calls == []
+    assert repository.claimed == set()
+    assert repository.persisted == []
+
+
+@pytest.mark.asyncio
+async def test_qa_in_reply_has_precedence_and_does_not_use_bot_quote() -> None:
+    service = FakeService()
+    repository = FakeRepository()
+    sender = FakeSender()
+
+    status = await handler(service, repository, sender).handle(
+        message("#问 谁说的？", reply_reference_key="REFIDX_QUOTED")
+    )
+
+    assert status is GroupAssistantStatus.SUCCEEDED
+    assert service.calls[0]["mode"].value == "grounded_qa"  # type: ignore[union-attr]
+    assert service.calls[0]["quoted_platform_content"] is None
+    assert repository.persisted[0].trigger_type is AssistantTriggerType.GROUNDED_QA  # type: ignore[attr-defined]

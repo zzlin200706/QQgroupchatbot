@@ -43,6 +43,7 @@ _GROUP_MESSAGE_EVENTS = frozenset({"GROUP_MESSAGE_CREATE", "GROUP_AT_MESSAGE_CRE
 _REPLY_MESSAGE_TYPE = 103
 _FORWARD_MESSAGE_TYPE = 102
 _MENTION_TOKEN = re.compile(r"<@([^>]+)>")
+_REFERENCE_KEY = re.compile(r"REFIDX_[A-Za-z0-9+/_=-]+")
 
 
 class QQOfficialMessageParser:
@@ -127,6 +128,7 @@ class QQOfficialMessageParser:
                 ReplySegment(
                     position=start_position,
                     referenced_message_id=None,
+                    reference_key=None,
                     resolution_status=ReplyResolutionStatus.UNRESOLVED,
                     raw_data={
                         "msg_elements": copy.deepcopy(elements),
@@ -138,8 +140,13 @@ class QQOfficialMessageParser:
             ReplySegment(
                 position=start_position + index,
                 # The observed ref_msg_idx/msg_idx values are opaque REFIDX
-                # tokens, not Gateway message IDs.  Preserve them in raw_data.
+                # tokens, not Gateway message IDs.
                 referenced_message_id=None,
+                reference_key=_reply_reference_key(
+                    element,
+                    message_scene=message_scene,
+                    allow_scene_fallback=len(elements) == 1,
+                ),
                 resolution_status=ReplyResolutionStatus.UNRESOLVED,
                 resolved_message=self._resolved_reply_message(element),
                 raw_data={
@@ -313,6 +320,55 @@ class QQOfficialMessageParser:
                     )
                 )
         return segments
+
+
+def _reply_reference_key(
+    element: object,
+    *,
+    message_scene: object,
+    allow_scene_fallback: bool,
+) -> str | None:
+    if not isinstance(element, Mapping):
+        return None
+    element_value = element.get("msg_idx")
+    element_key = _valid_reference_key(element_value)
+    scene_keys = _scene_reply_reference_keys(message_scene)
+
+    # A malformed element value or conflicting target evidence is unresolved.
+    if element_value is not None and element_key is None:
+        return None
+    if element_key is not None:
+        if scene_keys and scene_keys != (element_key,):
+            return None
+        return element_key
+    if allow_scene_fallback and len(scene_keys) == 1:
+        return scene_keys[0]
+    return None
+
+
+def _scene_reply_reference_keys(message_scene: object) -> tuple[str, ...]:
+    if not isinstance(message_scene, Mapping):
+        return ()
+    ext = message_scene.get("ext")
+    if not isinstance(ext, list):
+        return ()
+    keys: list[str] = []
+    for item in ext:
+        if not isinstance(item, str):
+            continue
+        name, separator, value = item.partition("=")
+        if separator != "=" or name != "ref_msg_idx":
+            continue
+        key = _valid_reference_key(value)
+        if key is not None and key not in keys:
+            keys.append(key)
+    return tuple(keys)
+
+
+def _valid_reference_key(value: object) -> str | None:
+    if not isinstance(value, str) or _REFERENCE_KEY.fullmatch(value) is None:
+        return None
+    return value
 
 
 def _event_payload(event: Mapping[str, Any]) -> tuple[str | None, object]:

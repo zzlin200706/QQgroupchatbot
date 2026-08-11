@@ -155,7 +155,12 @@ def test_other_member_mention_is_preserved_but_does_not_trigger_alone() -> None:
 
 
 def test_opaque_reply_is_not_assumed_to_target_bot() -> None:
-    reply = ReplySegment(position=0, raw_data={"ref_msg_idx": "opaque"}, referenced_message_id=None)
+    reply = ReplySegment(
+        position=0,
+        raw_data={"ref_msg_idx": "opaque"},
+        referenced_message_id=None,
+        reference_key="REFIDX_opaque==",
+    )
     assert (
         detect_group_assistant_trigger(
             message(
@@ -166,6 +171,24 @@ def test_opaque_reply_is_not_assumed_to_target_bot() -> None:
         )
         is None
     )
+
+
+def test_grounded_qa_has_precedence_over_reply_reference() -> None:
+    trigger = detect_group_assistant_trigger(
+        message(
+            ReplySegment(
+                position=0,
+                raw_data={"msg_idx": "REFIDX_bot=="},
+                referenced_message_id=None,
+                reference_key="REFIDX_bot==",
+            ),
+            TextSegment(position=1, raw_data="#问 谁说的？", text="#问 谁说的？"),
+            message_type="103",
+        )
+    )
+    assert trigger is not None
+    assert trigger.trigger_type is AssistantTriggerType.GROUNDED_QA
+    assert trigger.user_input == "谁说的？"
 
 
 @pytest.mark.parametrize(

@@ -24,6 +24,7 @@ from app.parsers import QQOfficialMessageParser
 
 
 SAMPLES_DIRECTORY = Path(__file__).parents[2] / "data" / "qq_official_samples"
+SMOKE_FIXTURES_DIRECTORY = Path(__file__).parents[1] / "fixtures" / "qq_official"
 MANIFEST_PATH = SAMPLES_DIRECTORY / "manifest.json"
 
 
@@ -147,6 +148,7 @@ def test_parse_real_reply_sample(filename: str, expected_segment_type: type[obje
     reply = message.segments[0]
     assert isinstance(reply, ReplySegment)
     assert reply.referenced_message_id is None
+    assert reply.reference_key == event["data"]["msg_elements"][0]["msg_idx"]
     assert reply.resolution_status is ReplyResolutionStatus.UNRESOLVED
     assert reply.raw_data["msg_element"] == event["data"]["msg_elements"][0]
     assert reply.raw_data["message_scene"] == event["data"]["message_scene"]
@@ -166,7 +168,64 @@ def test_real_reply_ref_idx_stays_out_of_platform_message_id_namespace() -> None
     reply = message.segments[0]
     assert isinstance(reply, ReplySegment)
     assert reply.referenced_message_id is None
+    assert reply.reference_key == "REFIDX_r57sIZqkOaRAu4hcqJneWQ=="
     assert event["data"]["msg_elements"][0]["msg_idx"] != event["data"]["id"]
+
+
+def test_conflicting_or_malformed_reply_reference_evidence_fails_closed() -> None:
+    event = sample("007_reply_text.json")
+    event["data"]["msg_elements"][0]["msg_idx"] = "REFIDX_conflict=="
+    message = QQOfficialMessageParser().parse(event)
+    assert message is not None
+    reply = message.segments[0]
+    assert isinstance(reply, ReplySegment)
+    assert reply.reference_key is None
+
+    event["data"]["msg_elements"][0]["msg_idx"] = "not-a-refidx"
+    message = QQOfficialMessageParser().parse(event)
+    assert message is not None
+    reply = message.segments[0]
+    assert isinstance(reply, ReplySegment)
+    assert reply.reference_key is None
+
+
+@pytest.mark.parametrize(
+    ("filename", "reference_key", "quoted_text"),
+    [
+        (
+            "reply_human_smoke_sanitized.json",
+            "REFIDX_QUOTED_HUMAN",
+            "什么是gil",
+        ),
+        (
+            "reply_bot_smoke_sanitized.json",
+            "REFIDX_QUOTED_BOT",
+            "GIL 通常指 Global Interpreter Lock（全局解释器锁）。",
+        ),
+    ],
+)
+def test_sanitized_real_smoke_reply_shapes_preserve_content_without_author_guessing(
+    filename: str,
+    reference_key: str,
+    quoted_text: str,
+) -> None:
+    payload = json.loads(
+        (SMOKE_FIXTURES_DIRECTORY / filename).read_text(encoding="utf-8")
+    )
+    message = QQOfficialMessageParser().parse(payload)
+    assert message is not None
+    reply = message.segments[0]
+    assert isinstance(reply, ReplySegment)
+    assert reply.reference_key == reference_key
+    assert reply.referenced_message_id is None
+    assert reply.resolved_message is not None
+    assert reply.resolved_message.author.availability is IdentityAvailability.UNAVAILABLE
+    quoted = reply.resolved_message.segments[0]
+    assert isinstance(quoted, TextSegment)
+    assert quoted.text == quoted_text
+    assert message.actor.user_id == "test-user"
+    assert message.author.user_id == "test-user"
+    assert reply.referenced_message_id is None
 
 
 def test_parse_real_forward_sample() -> None:

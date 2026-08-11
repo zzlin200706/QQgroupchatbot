@@ -59,6 +59,7 @@ def test_codec_explicitly_encodes_relations_kinds_depth_and_enum_values() -> Non
                 position=0,
                 raw_data={"ref_msg_idx": "REFIDX_1"},
                 referenced_message_id=None,
+                reference_key="REFIDX_1",
                 resolution_status=ReplyResolutionStatus.RESOLVED,
                 resolved_message=ResolvedMessageReference(
                     platform_message_id="quoted-1",
@@ -122,6 +123,7 @@ def test_codec_explicitly_encodes_relations_kinds_depth_and_enum_values() -> Non
     reply_record = record.nodes[0]
     forward_record = record.nodes[3]
     assert reply_record.payload_json["resolution_status"] == "resolved"
+    assert reply_record.payload_json["reference_key"] == "REFIDX_1"
     assert forward_record.payload_json["resolution_status"] == "embedded"
     assert "content" not in forward_record.payload_json
     assert "nodes" not in forward_record.payload_json

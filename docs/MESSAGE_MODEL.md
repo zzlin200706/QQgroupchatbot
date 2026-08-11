@@ -210,6 +210,7 @@ class ReplyResolutionStatus(str, Enum):
 @dataclass(frozen=True)
 class ReplySegment(Segment):
     referenced_message_id: str | None
+    reference_key: str | None = None
     resolution_status: ReplyResolutionStatus = ReplyResolutionStatus.UNRESOLVED
     resolved_message: ResolvedMessageReference | None = None
     resolved_raw_data: Any = None
@@ -218,8 +219,14 @@ class ReplySegment(Segment):
 当前 QQ Official parser 对 reply 的边界是：
 
 - 保留原始 `msg_elements` / `message_scene` 等 opaque 数据
-- 不把 `ref_msg_idx` 伪装成真实 `platform_message_id`
+- 真实 `103` samples 中 reply element `msg_idx` 与 `message_scene.ext.ref_msg_idx` 一致时，保存为 `reference_key`
+- `message_scene.ext.msg_idx` 是当前消息自己的 opaque index，不作为 reply target
+- 不把 `ref_msg_idx` / `reference_key` 伪装成真实 `platform_message_id`
 - 当前 runtime 不做网络补全
+
+`reference_key` 只表达 QQ payload 中的 opaque reply reference，不参与 assistant trigger。它不是 `platform_message_id`，也不会用于推断 quoted author。
+
+quoted element 的正文作为通用 reply 数据保留，其 `ResolvedMessageReference.author` 继续为 `unavailable`。只有消息同时具有 `#问` 或 structured `@bot` trigger 时业务层才会处理 AI；structured `@bot` 可把正文作为不可信平台上下文，单独 reply 不触发机器人。
 
 ### ResolvedMessageReference
 
@@ -313,6 +320,7 @@ class UnknownSegment(Segment):
 - 文本、mention、图片、文件按当前 sample 和官方文档明确字段解析
 - 不访问网络
 - 不做 reply / forward 的远程补全
+- reply reference 与 quoted content 保真保存，不改变 inbound author/actor，也不单独触发 Assistant
 - 不猜测身份
 
 这意味着：

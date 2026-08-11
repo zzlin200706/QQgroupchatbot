@@ -14,7 +14,16 @@ from app.domain.assistant_interactions import (
     AssistantResult,
     AssistantTriggerType,
 )
-from app.domain.messages import InternalMessage
+from app.domain.messages import (
+    AtSegment,
+    FileSegment,
+    ForwardSegment,
+    ImageSegment,
+    InternalMessage,
+    ReplySegment,
+    TextSegment,
+    UnknownSegment,
+)
 from app.services.group_assistant_trigger import (
     GroupAssistantTrigger,
     detect_group_assistant_trigger,
@@ -89,6 +98,12 @@ class GroupAssistantHandler:
         if not self._enabled:
             return GroupAssistantStatus.DISABLED
         trigger = detect_group_assistant_trigger(message)
+        unverified_platform_quote = (
+            _quoted_platform_content(message)
+            if trigger is not None
+            and trigger.trigger_type is AssistantTriggerType.MENTION_CHAT
+            else None
+        )
         if trigger is None:
             return GroupAssistantStatus.NOT_TRIGGER
         if not self._valid_context(message):
@@ -141,6 +156,7 @@ class GroupAssistantHandler:
                 mode=trigger.mode,
                 message=message,
                 user_input=trigger.user_input,
+                quoted_platform_content=unverified_platform_quote,
             )
         except Exception as error:
             logger.warning(
@@ -260,3 +276,32 @@ class GroupAssistantHandler:
 def _response_message_id(send_result: object) -> str | None:
     value = getattr(send_result, "message_id", None)
     return value if isinstance(value, str) and value.strip() else None
+
+
+def _quoted_platform_content(message: InternalMessage) -> str | None:
+    replies = tuple(
+        segment for segment in message.segments if isinstance(segment, ReplySegment)
+    )
+    if len(replies) != 1 or replies[0].resolved_message is None:
+        return None
+    parts: list[str] = []
+    for segment in sorted(
+        replies[0].resolved_message.segments,
+        key=lambda value: value.position,
+    ):
+        if isinstance(segment, TextSegment):
+            parts.append(segment.text or "")
+        elif isinstance(segment, AtSegment):
+            parts.append("@" + (segment.display_name or "用户"))
+        elif isinstance(segment, ImageSegment):
+            parts.append("[图片]")
+        elif isinstance(segment, FileSegment):
+            parts.append(f"[文件: {segment.name}]" if segment.name else "[文件]")
+        elif isinstance(segment, ForwardSegment):
+            parts.append("[合并转发：内容未解析]")
+        elif isinstance(segment, ReplySegment):
+            parts.append("[引用消息]")
+        elif isinstance(segment, UnknownSegment):
+            parts.append("[未知消息类型]")
+    rendered = "".join(parts).strip()
+    return rendered or None

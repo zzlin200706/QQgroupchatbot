@@ -53,6 +53,7 @@ class ReplyResolutionStatus(str, Enum):
 @dataclass(frozen=True)
 class ReplySegment(Segment):
     referenced_message_id: str | None
+    reference_key: str | None = None
     resolution_status: ReplyResolutionStatus = ReplyResolutionStatus.UNRESOLVED
     resolved_message: "ResolvedMessageReference | None" = None
     resolved_raw_data: Any = None

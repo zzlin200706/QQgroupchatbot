@@ -58,10 +58,15 @@ def detect_group_assistant_trigger(
 
 def _qa_input(message: InternalMessage) -> str | None:
     if not message.segments or any(
-        not isinstance(segment, TextSegment) for segment in message.segments
+        not isinstance(segment, (TextSegment, ReplySegment))
+        for segment in message.segments
     ):
         return None
-    text = "".join(segment.text or "" for segment in message.segments)
+    text = "".join(
+        segment.text or ""
+        for segment in message.segments
+        if isinstance(segment, TextSegment)
+    )
     matched = _QA_COMMAND.fullmatch(text)
     if matched is None:
         return None
@@ -96,7 +101,7 @@ def _mention_input(message: InternalMessage) -> str:
         elif isinstance(segment, FileSegment):
             parts.append(f"[文件: {segment.name}]" if segment.name else "[文件]")
         elif isinstance(segment, ReplySegment):
-            parts.append("[回复消息，引用目标不可可靠识别]")
+            continue
         elif isinstance(segment, ForwardSegment):
             parts.append("[合并转发：内容未解析]")
         elif isinstance(segment, UnknownSegment):

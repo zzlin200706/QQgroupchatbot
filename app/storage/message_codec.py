@@ -258,6 +258,7 @@ def _segment_payload(segment: MessageSegment) -> tuple[str, dict[str, Any]]:
     if isinstance(segment, ReplySegment):
         return "reply", {
             "referenced_message_id": segment.referenced_message_id,
+            "reference_key": segment.reference_key,
             "resolution_status": segment.resolution_status.value,
             "raw_data": copy.deepcopy(segment.raw_data),
             "resolved_raw_data": copy.deepcopy(segment.resolved_raw_data),
@@ -370,6 +371,7 @@ class _NodeDecoder:
                 resolved = self._decode_resolved_message(resolved_nodes[0]) if resolved_nodes else None
                 result = ReplySegment(
                     referenced_message_id=payload.get("referenced_message_id"),
+                    reference_key=payload.get("reference_key"),
                     resolution_status=ReplyResolutionStatus(payload["resolution_status"]),
                     resolved_message=resolved,
                     resolved_raw_data=copy.deepcopy(payload.get("resolved_raw_data")),

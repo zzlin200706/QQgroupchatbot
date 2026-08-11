@@ -1,0 +1,36 @@
+{
+  "captured_at": "2026-08-11T00:00:00+00:00",
+  "gateway": {
+    "op": 0,
+    "s": 1,
+    "t": "GROUP_MESSAGE_CREATE"
+  },
+  "data": {
+    "author": {
+      "bot": false,
+      "id": "test-user",
+      "member_openid": "test-user",
+      "username": "测试用户"
+    },
+    "content": " 那多线程为什么没有这个功能",
+    "group_id": "test-group",
+    "group_openid": "test-group",
+    "id": "test-human-reply-message",
+    "message_scene": {
+      "ext": [
+        "ref_msg_idx=REFIDX_QUOTED_HUMAN",
+        "msg_idx=REFIDX_CURRENT_HUMAN_REPLY"
+      ],
+      "source": "default"
+    },
+    "message_type": 103,
+    "msg_elements": [
+      {
+        "content": "什么是gil",
+        "message_type": 103,
+        "msg_idx": "REFIDX_QUOTED_HUMAN"
+      }
+    ],
+    "timestamp": "2026-08-11T12:00:00+08:00"
+  }
+}

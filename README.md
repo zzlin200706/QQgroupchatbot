@@ -10,7 +10,7 @@
 - 核心原则是 `raw-first`：先保存 raw event，再做 parser 和上层处理
 - 领域边界是 `internal model first`：LLM、renderer、repository、summary command 只依赖 `InternalMessage`
 - 默认长期部署方案是 `SQLite + ./data/ + 单进程 asyncio`，不是多服务重基础设施
-- 当前文本 AI 功能包括群聊 `#总结`、grounded `#问` 和结构化 `@bot` 对话
+- 当前文本 AI 功能包括群聊 `#总结`、grounded `#问` 和结构化 `@bot` 对话；reply reference 已保真解析，但真实被动回复路径尚不能证明被引用者是 Bot
 - 普通群消息只入库，不触发 LLM；图片、文件、RAG、工具调用仍未实现
 
 ## 当前实现
@@ -29,6 +29,8 @@
 - `#问 <问题>` 当前群历史 grounded QA
 - `GROUP_AT_MESSAGE_CREATE` 或真实 sample 中 `mentions[].is_you=true` 的 `@bot` 对话
 - 成功 Bot 回答独立持久化到 `assistant_interactions`
+- reply 的 opaque reference 与 quoted content 保真解析、存储
+- 结构化 `@bot + reply` 可把平台引用正文作为不可信上下文使用，不推断 quoted author
 - 最近群消息与成功 assistant turns 的 group-scoped 多轮上下文
 - inbound transport selector: `QQ_EVENT_TRANSPORT=websocket|webhook` (default `websocket`)
 - FastAPI `/health` 和应用生命周期管理
@@ -48,7 +50,7 @@ QQ Official WebSocket / Webhook
 → QQOfficialInteractionDispatcher
 ├── #ping → QQOfficialGroupMessageSender
 ├── #总结 → SummaryService → SummaryRepository → QQOfficialGroupMessageSender
-└── #问 / @bot
+└── #问 / structured @bot
     → ConversationQueryService
     → MessageRenderer
     → GroupAssistantService
@@ -77,8 +79,9 @@ inbound transport
 - 当前项目的实际回复链路只做由入站消息触发的被动回复，不把“只有 `group_id` 的主动群发”作为当前 phase 范围
 - parser 和 summary 失败都不能导致 raw event 丢失
 - `message_type == 102` 当前仍按 unresolved forward 保存
-- `message_type == 103` 当前只保留 reply 的 opaque 引用信息，不把 `ref_msg_idx` 伪装成真实消息 ID
-- 当前 reply sample 无法把 `REFIDX` 可靠映射到 Bot outbound message ID，因此 reply-to-bot 不自动触发 LLM
+- `message_type == 103` 将 opaque target `REFIDX` 保存为独立 `ReplySegment.reference_key`，绝不写入 `referenced_message_id`
+- reply 本身不是 assistant trigger；没有 `#问` 或 structured `@bot` 时只做 raw-first 入库，不 claim、不调用 LLM、不回复
+- structured `@bot + reply` 会把可取得的 quoted content 标记为 untrusted platform data；不会从正文推断被引用者身份
 - `#问` 不使用历史 Bot 回答作为事实；chat 才会把成功 Bot turn 标记为 assistant-generated context
 - 不允许把 forward tree 提前 flatten 成 `sender + text`
 - 不主动引入 `PostgreSQL`、`MySQL`、`Redis`、`Kafka`、`RabbitMQ`、`Celery`、`Elasticsearch`、独立向量数据库、`Kubernetes`、微服务
@@ -92,6 +95,8 @@ inbound transport
 1. 腾讯当前官方文档
 2. 仓库内真实脱敏 sample：`data/qq_official_samples/`
 3. 第三方 reference implementation
+
+Reply policy：项目有意不支持“仅回复 Bot 消息就自动触发 Assistant”。QQ reply 仍按通用消息解析、保存；只有 `#问` 或 structured `@bot` 能触发 AI。
 
 ## 设计文档
 

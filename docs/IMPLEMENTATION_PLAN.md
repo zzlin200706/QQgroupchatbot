@@ -295,9 +295,9 @@ QQOfficialEventProcessor
 
 ### Reply context 结论
 
-当前真实 reply sample 的 `message_type=103` 只提供 opaque `ref_msg_idx/msg_idx` 和可选引用展示内容。它不提供可与 QQ send response `id` 可靠关联的 target message ID。腾讯 reference implementation 也依赖额外 RefIndex 本地映射层。
+当前真实 reply sample 的 `message_type=103` 提供 opaque reference information 和可选引用展示内容，但不提供可安全推断 quoted author 的身份依据。
 
-因此本 Phase 不猜测“上一条 Bot 消息”，不把 `REFIDX` 当 message ID，reply-to-bot 自动触发保持 unavailable。reply event 继续 raw-first 入库；只有同时存在可靠 `@bot` 证据时才按 mention chat 处理。
+最终策略固定为：reply event 继续 raw-first 入库并保留 `ReplySegment` / quoted content；单独 reply 不创建 assistant claim、不调用 LLM、不回复。`#问 + reply` 仍走 grounded QA；structured `@bot + reply` 才走 Chat，并将 quoted content 放入 `untrusted-platform-data` prompt block。Automatic reply-to-bot continuation intentionally unsupported。
 
 ### 配置
 
@@ -319,7 +319,7 @@ ASSISTANT_COOLDOWN_SECONDS=3
 ### 当前状态
 
 - implementation validated
-- automated unit/integration tests: `299 passed`
+- automated unit/integration tests: `309 passed`
 - real QQ assistant smoke pending
 - default inbound transport remains `websocket`
 - Phase M webhook automated support remains validated; real webhook smoke remains pending
@@ -416,7 +416,7 @@ QQ outbound service 不负责：
 - summary
 - AI reasoning
 
-reply-to-bot 仍取决于未来能否获得或建立可靠 `REFIDX → Bot outbound message_id` 映射；当前不猜测。
+Reply reference 不参与 AssistantInteraction lookup。无 `@` reply 有意保持 storage-only；显式 structured `@bot` 才可使用作者不可用的引用正文。
 
 ## Later — Context Expansion
 

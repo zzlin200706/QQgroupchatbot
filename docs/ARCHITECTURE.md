@@ -178,12 +178,12 @@ successful assistant_interactions persistence
 当前 parser 的几个关键边界：
 
 - `message_type == 102`：保存为 unresolved `ForwardSegment`
-- `message_type == 103`：reply 只保存 opaque `msg_elements` / `message_scene`
+- `message_type == 103`：保留 opaque `msg_elements` / `message_scene`，并把一致、格式有效的 target `REFIDX` 保存为 `ReplySegment.reference_key`
 - mention 只有在 `content` token 与 `mentions[]` 明确对应时才生成 `AtSegment`
 - mention 的 `is_self` 只来自明确布尔 `mentions[].is_you`；`GROUP_AT_MESSAGE_CREATE` 由官方事件类型确认 Bot mention
 - 未确认结构一律保留为 `UnknownSegment`
 
-未来如果需要 reply / forward 补全，应该通过概念接口实现，而不是把某个平台 action 名称写死成领域边界。例如：
+parser 不访问 SQLite，也不解析 quoted author。当前 runtime 不做 reply target lookup；未来如果需要 reply / forward 网络补全，仍应通过概念接口实现：
 
 ```python
 class MessageReferenceResolver:
@@ -194,14 +194,14 @@ class MessageReferenceResolver:
         ...
 ```
 
-当前 runtime 尚未实现这一层。
+`reference_key` 是 QQ opaque lookup key，不是 `platform_message_id`。`referenced_message_id` 在没有真实 message ID 时继续为 `None`。
 
 ### Storage
 
 - `raw_events` 是 parser replay 和字段追溯的事实源头
 - `messages + message_nodes` 当前用于保存可重建的 `InternalMessage` 树
 - `summaries` 只保存 validated summary result 与最小必要元数据
-- `assistant_interactions` 只保存已经成功发送给 QQ 的 Bot turn；outbound 不伪造成 raw event 或 `InternalMessage`
+- `assistant_interactions` 只保存已经成功发送给 QQ 的 Bot turn，包括可选 `response_message_id`；outbound 不伪造成 raw event 或 `InternalMessage`
 - `assistant_trigger_claims` 对 `(platform, group_id, trigger_message_id, trigger_type)` 做轻量持久化去重
 - 不保存 prompt、完整 conversation、provider body 或 secret
 
@@ -241,8 +241,10 @@ generate
 - `#问` 只使用同 platform、同 group、当前 trigger 之前的 `InternalMessage`；历史 Bot 回答不进入 grounded evidence
 - `@bot` 使用最近群消息和同群成功 `assistant_interactions`，按 trigger timestamp 合并为 role-aware timeline
 - trigger 优先级是 `#ping → #总结 → #问 → structured @bot → ordinary`
-- 普通消息、普通图片、普通 forward 和无法确认目标的 reply 都不调用 LLM
-- 当前真实 reply sample 只有 opaque `REFIDX`，无法可靠映射到 outbound `message_id`；因此 reply-to-bot 自动触发暂不启用
+- reply 本身永远不是 assistant trigger；没有 `#问` 或 structured `@bot` 时只入库，不 claim、不调用 LLM
+- structured `@bot + reply` 使用 parser 已保留的 quoted content，并以 `untrusted-platform-data` block 进入 Chat
+- quoted content 不提供 author identity，不能按正文匹配 Bot 或群成员，也不能覆盖 system prompt
+- `#问 + reply` 仍只使用 inbound 群历史作为 grounded evidence，不把历史 Bot answer 当事实
 - assistant 顺序固定为 `claim trigger → generate → send → persist successful turn`
 
 ## LLM 边界
@@ -342,10 +344,10 @@ validated domain result
 2. exact `#总结`
 3. exact-prefix `#问 <问题>`
 4. `GROUP_AT_MESSAGE_CREATE` 或结构化 `AtSegment.is_self is True`
-5. ordinary message: no action
+5. ordinary message or reply without an explicit trigger: no action
 ```
 
-一个 message 最多选择一个 handler。显示名称 substring 不作为 mention 证据；opaque reply 不作为 reply-to-bot 证据。
+一个 message 最多选择一个 handler。显示名称 substring 和 reply reference 都不作为 Bot trigger 证据。
 
 ## Storage 路线
 

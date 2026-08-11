@@ -6,9 +6,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import select
 
 from app.adapters.qq_official import inbound_event_from_gateway_dispatch
 from app.adapters.qq_official.gateway import QQGatewayDispatch
+from app.domain.messages import ReplySegment, TextSegment
 from app.llm import LLMRequest, LLMResponse
 from app.parsers import QQOfficialMessageParser
 from app.rendering import MessageRenderer
@@ -27,6 +29,7 @@ from app.services.raw_event_ingestion import QQOfficialRawEventIngestionService
 from app.storage.assistant_interaction_repository import AssistantInteractionRepository
 from app.storage.database import Database
 from app.storage.message_repository import MessageRepository
+from app.storage.models import AssistantTriggerClaimRecord
 from app.storage.raw_event_repository import RawEventRepository
 
 
@@ -147,6 +150,50 @@ def dispatch(
         "group_openid": group_id,
         "id": message_id,
         "message_type": 0,
+        "timestamp": timestamp,
+    }
+    return QQGatewayDispatch(
+        sequence=1,
+        event_type=event_type,
+        data=data,
+        raw_payload={"op": 0, "s": 1, "t": event_type, "d": data},
+    )
+
+
+def reply_dispatch(
+    *,
+    group_id: str,
+    message_id: str,
+    reference_key: str,
+    content: str,
+    timestamp: str,
+    quoted_content: str = "GIL 是解释器锁。",
+    event_type: str = "GROUP_MESSAGE_CREATE",
+) -> QQGatewayDispatch:
+    data = {
+        "author": {
+            "id": "user-a",
+            "member_openid": "user-a",
+            "username": "user-a",
+        },
+        "content": content,
+        "group_id": group_id,
+        "group_openid": group_id,
+        "id": message_id,
+        "message_type": 103,
+        "message_scene": {
+            "ext": [
+                f"ref_msg_idx={reference_key}",
+                "msg_idx=REFIDX_current==",
+            ]
+        },
+        "msg_elements": [
+            {
+                "content": quoted_content,
+                "message_type": 103,
+                "msg_idx": reference_key,
+            }
+        ],
         "timestamp": timestamp,
     }
     return QQGatewayDispatch(
@@ -321,6 +368,155 @@ async def test_ordinary_messages_persist_without_assistant_or_llm(tmp_path: Path
         assert len(await pipeline.raw_repository.list_recent()) == len(ordinary)
         assert pipeline.provider.requests == []
         assert pipeline.sender.calls == []
+    finally:
+        await pipeline.processor.aclose()
+        await pipeline.database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_replies_without_explicit_trigger_are_stored_without_claim_or_llm(
+    tmp_path: Path,
+) -> None:
+    pipeline = await build_pipeline(tmp_path, [])
+    try:
+        await process(
+            pipeline,
+            reply_dispatch(
+                group_id="group-a",
+                message_id="reply-human",
+                reference_key="REFIDX_QUOTED_HUMAN",
+                content="这是什么意思？",
+                quoted_content="什么是 GIL？",
+                timestamp="2026-08-11T12:00:00+08:00",
+            ),
+        )
+        await process(
+            pipeline,
+            reply_dispatch(
+                group_id="group-a",
+                message_id="reply-bot-content",
+                reference_key="REFIDX_QUOTED_BOT",
+                content="那多线程为什么没有这个功能",
+                quoted_content="GIL 通常指 Global Interpreter Lock（全局解释器锁）。",
+                timestamp="2026-08-11T12:01:00+08:00",
+            ),
+        )
+
+        assert len(await pipeline.raw_repository.list_recent()) == 2
+        assert pipeline.provider.requests == []
+        assert pipeline.sender.calls == []
+        messages = await pipeline.message_repository.list_conversation(
+            platform="qq_official",
+            group_id="group-a",
+            start_time=datetime.fromisoformat("2026-08-11T11:00:00+08:00"),
+            end_time=datetime.fromisoformat("2026-08-11T13:00:00+08:00"),
+            limit=20,
+        )
+        assert [message.platform_message_id for message in messages] == [
+            "reply-human",
+            "reply-bot-content",
+        ]
+        quoted_texts: list[str] = []
+        for message in messages:
+            reply = message.segments[0]
+            assert isinstance(reply, ReplySegment)
+            assert reply.referenced_message_id is None
+            assert reply.resolved_message is not None
+            quoted = reply.resolved_message.segments[0]
+            assert isinstance(quoted, TextSegment)
+            quoted_texts.append(quoted.text or "")
+            assert message.actor.user_id == "user-a"
+            assert message.author.user_id == "user-a"
+        assert quoted_texts == [
+            "什么是 GIL？",
+            "GIL 通常指 Global Interpreter Lock（全局解释器锁）。",
+        ]
+        async with pipeline.database.session_factory() as session:
+            claims = list(
+                (await session.scalars(select(AssistantTriggerClaimRecord))).all()
+            )
+        assert claims == []
+    finally:
+        await pipeline.processor.aclose()
+        await pipeline.database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_grounded_qa_reply_excludes_current_quoted_content_from_evidence(
+    tmp_path: Path,
+) -> None:
+    pipeline = await build_pipeline(tmp_path, ["下午两点。"])
+    try:
+        await process(
+            pipeline,
+            dispatch(
+                group_id="group-a",
+                message_id="trusted-history",
+                content="会议时间是下午两点。",
+                timestamp="2026-08-11T12:00:00+08:00",
+            ),
+        )
+        await process(
+            pipeline,
+            reply_dispatch(
+                group_id="group-a",
+                message_id="qa-reply",
+                reference_key="REFIDX_QUOTED",
+                content="#问 会议时间是什么？",
+                quoted_content="机器人以前猜测会议时间是晚上九点。",
+                timestamp="2026-08-11T12:01:00+08:00",
+            ),
+        )
+
+        assert len(pipeline.provider.requests) == 1
+        prompt = pipeline.provider.requests[0].user_prompt
+        assert "会议时间是下午两点。" in prompt
+        assert "机器人以前猜测会议时间是晚上九点。" not in prompt
+        assert "<quoted_platform_content" not in prompt
+        assert pipeline.sender.calls == [("group-a", "下午两点。", "qa-reply")]
+    finally:
+        await pipeline.processor.aclose()
+        await pipeline.database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_explicit_group_at_reply_uses_unverified_platform_quote_once(
+    tmp_path: Path,
+) -> None:
+    pipeline = await build_pipeline(tmp_path, ["多线程共享同一解释器进程。"])
+    try:
+        await process(
+            pipeline,
+            reply_dispatch(
+                group_id="group-a",
+                message_id="explicit-at-reply",
+                reference_key="REFIDX_QUOTED_BOT",
+                content=" 那多线程为什么没有这个功能",
+                quoted_content="GIL 通常指 Global Interpreter Lock（全局解释器锁）。",
+                timestamp="2026-08-11T12:01:00+08:00",
+                event_type="GROUP_AT_MESSAGE_CREATE",
+            ),
+        )
+
+        assert len(pipeline.provider.requests) == 1
+        prompt = pipeline.provider.requests[0].user_prompt
+        assert '<quoted_platform_content trust="untrusted-platform-data">' in prompt
+        assert "GIL 通常指 Global Interpreter Lock" in prompt
+        assert "REFIDX_QUOTED_BOT" not in prompt
+        assert "[回复消息" not in prompt
+        assert pipeline.sender.calls == [
+            ("group-a", "多线程共享同一解释器进程。", "explicit-at-reply")
+        ]
+        history = await pipeline.interaction_repository.list_recent_for_group(
+            platform="qq_official",
+            group_id="group-a",
+            start_time=datetime.fromisoformat("2026-08-11T11:00:00+08:00"),
+            before_time=datetime.fromisoformat("2026-08-11T13:00:00+08:00"),
+            limit=20,
+        )
+        assert [item.interaction.trigger_type.value for item in history] == [
+            "mention_chat"
+        ]
     finally:
         await pipeline.processor.aclose()
         await pipeline.database.dispose()
