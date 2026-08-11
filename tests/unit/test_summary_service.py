@@ -57,7 +57,7 @@ class FakeProvider:
 
 def known(name: str, user_id: str) -> IdentityRef:
     return IdentityRef(
-        platform="onebot11",
+        platform="qq_official",
         user_id=user_id,
         display_name=name,
         card=None,
@@ -75,7 +75,7 @@ def internal_message(
 ) -> InternalMessage:
     author = author or known("Alice", "RAW-QQ-ID-1001")
     return InternalMessage(
-        platform="onebot11",
+        platform="qq_official",
         source_raw_event_id=raw_event_id,
         platform_message_id=f"PRIVATE-MESSAGE-ID-{raw_event_id}",
         context=MessageContext(message_type="group", sub_type=None, group_id=GROUP_ID),
@@ -151,13 +151,13 @@ async def test_successful_summary_uses_safe_renderer_prompt_and_program_metadata
     summary_service, query = service(messages, provider)
 
     result = await summary_service.summarize(
-        platform="onebot11",
+        platform="qq_official",
         group_id=GROUP_ID,
         start_time=START,
         end_time=END,
     )
 
-    assert result.platform == "onebot11"
+    assert result.platform == "qq_official"
     assert result.group_id == GROUP_ID
     assert result.start_time == START
     assert result.end_time == END
@@ -234,7 +234,7 @@ async def test_message_overflow_is_detected_without_partial_summary() -> None:
 
     with pytest.raises(SummaryWindowTooLarge, match="more messages"):
         await summary_service.summarize(
-            platform="onebot11",
+            platform="qq_official",
             group_id=GROUP_ID,
             start_time=START,
             end_time=END,
@@ -255,7 +255,7 @@ async def test_character_overflow_is_not_silently_truncated() -> None:
 
     with pytest.raises(SummaryWindowTooLarge, match="character limit"):
         await summary_service.summarize(
-            platform="onebot11",
+            platform="qq_official",
             group_id=GROUP_ID,
             start_time=START,
             end_time=END,
@@ -312,7 +312,7 @@ async def test_invalid_llm_summary_never_enters_business_result(content: str) ->
 
     with pytest.raises(LLMInvalidResponseError):
         await summary_service.summarize(
-            platform="onebot11",
+            platform="qq_official",
             group_id=GROUP_ID,
             start_time=START,
             end_time=END,
@@ -338,7 +338,7 @@ async def test_length_finish_reason_is_rejected_even_for_a_fake_provider() -> No
 
     with pytest.raises(LLMInvalidResponseError, match="truncated"):
         await summary_service.summarize(
-            platform="onebot11",
+            platform="qq_official",
             group_id=GROUP_ID,
             start_time=START,
             end_time=END,
@@ -348,7 +348,7 @@ async def test_length_finish_reason_is_rejected_even_for_a_fake_provider() -> No
 @pytest.mark.asyncio
 async def test_unsafe_domain_fields_never_bypass_renderer() -> None:
     unavailable = IdentityRef(
-        platform="onebot11",
+        platform="qq_official",
         user_id=None,
         display_name=None,
         card=None,
@@ -389,7 +389,7 @@ async def test_unsafe_domain_fields_never_bypass_renderer() -> None:
     )
 
     await summary_service.summarize(
-        platform="onebot11",
+        platform="qq_official",
         group_id=GROUP_ID,
         start_time=START,
         end_time=END,

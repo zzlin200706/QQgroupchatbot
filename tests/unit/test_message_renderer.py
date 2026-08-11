@@ -27,7 +27,7 @@ from app.domain.messages import (
     TextSegment,
     UnknownSegment,
 )
-from app.parsers import OneBotMessageParser, QQOfficialMessageParser
+from app.parsers import QQOfficialMessageParser
 from app.rendering import MessageRenderer
 
 
@@ -40,7 +40,7 @@ def identity(
     *,
     user_id: str | None = None,
     availability: IdentityAvailability = IdentityAvailability.KNOWN,
-    platform: str = "onebot11",
+    platform: str = "qq_official",
 ) -> IdentityRef:
     return IdentityRef(
         platform=platform,
@@ -59,7 +59,7 @@ def identity(
 def message(
     *segments,
     author: IdentityRef | None = None,
-    platform: str = "onebot11",
+    platform: str = "qq_official",
     timestamp: datetime | None = NOW,
     raw_event_id: int = 1,
 ) -> InternalMessage:
@@ -333,6 +333,95 @@ def test_nested_forward_keeps_hierarchy_and_unknown_is_not_unavailable() -> None
     assert any("        - [原作者不可用]: old" in line for line in lines)
 
 
+def test_forward_node_preserves_own_author() -> None:
+    rendered = MessageRenderer().render_message(
+        message(
+            ForwardSegment(
+                position=0,
+                raw_data=None,
+                reference_id=None,
+                resolved=True,
+                resolution_status=ForwardResolutionStatus.EMBEDDED,
+                content=(),
+                nodes=(
+                    forward_node(
+                        identity("Bob", user_id="2"),
+                        TextSegment(position=0, raw_data=None, text="hello"),
+                    ),
+                ),
+            )
+        )
+    )
+
+    assert "- Bob: hello" in rendered
+    assert "Alice: hello" not in rendered
+
+
+def test_forward_node_without_author_does_not_inherit_event_sender() -> None:
+    rendered = MessageRenderer().render_message(
+        message(
+            ForwardSegment(
+                position=0,
+                raw_data=None,
+                reference_id=None,
+                resolved=True,
+                resolution_status=ForwardResolutionStatus.EMBEDDED,
+                content=(),
+                nodes=(
+                    forward_node(
+                        identity(None, availability=IdentityAvailability.UNAVAILABLE),
+                        TextSegment(position=0, raw_data=None, text="hello"),
+                    ),
+                ),
+            )
+        )
+    )
+
+    assert "- [原作者不可用]: hello" in rendered
+    assert "Alice: hello" not in rendered
+
+
+def test_nested_forward_node_without_author_does_not_inherit_parent_sender() -> None:
+    nested = ForwardSegment(
+        position=0,
+        raw_data=None,
+        reference_id=None,
+        resolved=True,
+        resolution_status=ForwardResolutionStatus.EMBEDDED,
+        content=(),
+        nodes=(
+            forward_node(
+                identity(None, availability=IdentityAvailability.UNAVAILABLE),
+                TextSegment(position=0, raw_data=None, text="nested"),
+                depth=2,
+            ),
+        ),
+    )
+    rendered = MessageRenderer().render_message(
+        message(
+            ForwardSegment(
+                position=0,
+                raw_data=None,
+                reference_id=None,
+                resolved=True,
+                resolution_status=ForwardResolutionStatus.EMBEDDED,
+                content=(),
+                nodes=(
+                    forward_node(
+                        identity("Bob", user_id="2"),
+                        nested,
+                    ),
+                ),
+            )
+        )
+    )
+
+    assert "- Bob:" in rendered
+    assert "        - [原作者不可用]: nested" in rendered
+    assert "        - Bob: nested" not in rendered
+    assert "Alice: nested" not in rendered
+
+
 def test_identity_labels_timezone_and_truncation_are_explicit() -> None:
     known_without_name = identity(None, user_id="123")
     unknown = identity(None, availability=IdentityAvailability.UNKNOWN)
@@ -399,48 +488,10 @@ def test_qq_official_103_refidx_and_102_forward_are_not_reparsed() -> None:
     reply_text = MessageRenderer(include_platform_ids=True).render_message(reply)
     forward_text = MessageRenderer().render_message(forward)
 
-    assert "[回复消息，引用ID不可用]" in reply_text
+    assert "[回复 [原作者不可用]: 原消息后恢复原消息]" in reply_text
     assert "REFIDX_" not in reply_text
     assert forward_text.endswith("[合并转发：内容未解析]")
     assert "[发送者]" not in forward_text
     parsed_forward = forward.segments[0]
     assert isinstance(parsed_forward, ForwardSegment)
     assert parsed_forward.nodes == ()
-
-
-def test_onebot_unknown_and_nested_forward_fixture_shapes_render() -> None:
-    payload = {
-        "post_type": "message",
-        "message_type": "group",
-        "group_id": 1,
-        "user_id": 10,
-        "time": 1786363994,
-        "sender": {"nickname": "Outer"},
-        "message": [
-            {"type": "future", "data": {"raw-secret": True}},
-            {
-                "type": "forward",
-                "data": {
-                    "content": [
-                        {
-                            "type": "node",
-                            "data": {
-                                "user_id": 20,
-                                "nickname": "Inner",
-                                "content": [{"type": "text", "data": {"text": "inside"}}],
-                            },
-                        }
-                    ]
-                },
-            },
-        ],
-    }
-    parsed = OneBotMessageParser().parse(payload, source_raw_event_id=1)
-    assert parsed is not None
-
-    rendered = MessageRenderer().render_message(parsed)
-
-    assert "[未知消息类型: future]" in rendered
-    assert "[合并转发]" in rendered
-    assert "- Inner: inside" in rendered
-    assert "raw-secret" not in rendered

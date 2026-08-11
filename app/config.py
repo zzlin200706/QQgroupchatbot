@@ -12,15 +12,11 @@ class Settings(BaseSettings):
     app_env: str = "development"
     log_level: str = "INFO"
 
-    onebot_ws_url: str = "ws://127.0.0.1:3001"
-    onebot_access_token: str = ""
-    onebot_connect_timeout_seconds: float = Field(default=10.0, gt=0)
-    onebot_action_timeout_seconds: float = Field(default=10.0, gt=0)
-    onebot_reconnect_initial_delay_seconds: float = Field(default=1.0, gt=0)
-    onebot_reconnect_max_delay_seconds: float = Field(default=30.0, gt=0)
-
     qq_bot_app_id: str = ""
     qq_bot_app_secret: str = ""
+    qq_api_timeout_seconds: float = Field(default=10.0, gt=0)
+    qq_gateway_reconnect_initial_delay_seconds: float = Field(default=1.0, gt=0)
+    qq_gateway_reconnect_max_delay_seconds: float = Field(default=30.0, gt=0)
 
     database_url: str = "sqlite+aiosqlite:///./data/qqgroupchatbot.db"
 

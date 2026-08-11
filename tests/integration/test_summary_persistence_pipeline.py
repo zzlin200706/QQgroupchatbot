@@ -7,12 +7,11 @@ from pathlib import Path
 import pytest
 from sqlalchemy import func, select
 
-from app.domain.messages import InternalMessage
 from app.llm import LLMRequest, LLMResponse, LLMServerError, LLMUsage
-from app.parsers import OneBotMessageParser
+from app.parsers import QQOfficialMessageParser
 from app.rendering import MessageRenderer
 from app.services.conversation_query import ConversationQueryService
-from app.services.raw_event_ingestion import RawEventIngestionService
+from app.services.raw_event_ingestion import QQOfficialRawEventIngestionService
 from app.services.summary import SummaryService
 from app.storage.database import Database
 from app.storage.message_repository import MessageRepository
@@ -21,7 +20,9 @@ from app.storage.raw_event_repository import RawEventRepository
 from app.storage.summary_repository import SummaryRepository
 
 
-ONEBOT_FIXTURE = Path(__file__).parents[1] / "fixtures" / "onebot" / "real_group_text_sanitized.json"
+QQ_SAMPLE = (
+    Path(__file__).parents[2] / "data" / "qq_official_samples" / "001_text.json"
+)
 
 
 class FakeLLMProvider:
@@ -66,9 +67,9 @@ async def prepare_pipeline(
     tmp_path: Path,
     *,
     fail_provider: bool = False,
-) -> tuple[Database, SummaryService, SummaryRepository, InternalMessage]:
-    payload = json.loads(ONEBOT_FIXTURE.read_text(encoding="utf-8"))
-    parsed_without_id = OneBotMessageParser().parse(payload, source_raw_event_id=1)
+):
+    payload = json.loads(QQ_SAMPLE.read_text(encoding="utf-8"))
+    parsed_without_id = QQOfficialMessageParser().parse(payload, raw_event_id=1)
     assert parsed_without_id is not None and parsed_without_id.timestamp is not None
     assert parsed_without_id.context.group_id is not None
 
@@ -78,25 +79,25 @@ async def prepare_pipeline(
     message_repository = MessageRepository(database.session_factory)
     raw = await raw_repository.insert(
         RawEvent(
-            platform="onebot11",
+            platform="qq_official",
             received_at=parsed_without_id.timestamp,
             event_time=parsed_without_id.timestamp,
-            post_type="message",
-            message_type="group",
-            sub_type=None,
+            post_type=None,
+            message_type="0",
+            sub_type="GROUP_MESSAGE_CREATE",
             self_id=None,
-            user_id=None,
+            user_id=parsed_without_id.actor.user_id,
             group_id=parsed_without_id.context.group_id,
             message_id=parsed_without_id.platform_message_id,
             raw_payload=payload,
-            payload_hash=RawEventIngestionService.payload_hash(payload),
+            payload_hash=QQOfficialRawEventIngestionService.payload_hash(payload),
         )
     )
-    parsed = OneBotMessageParser().parse(payload, source_raw_event_id=raw.id)
+    parsed = QQOfficialMessageParser().parse(payload, raw_event_id=raw.id)
     assert parsed is not None and parsed.timestamp is not None
     await message_repository.persist(
         parsed,
-        parser_name="onebot_message_parser",
+        parser_name="qq_official_message_parser",
         parser_version="1",
     )
     provider = FakeLLMProvider(fail=fail_provider)

@@ -37,7 +37,7 @@ COMMAND_TIME = datetime(2026, 8, 10, 12, tzinfo=timezone.utc)
 
 def identity(user_id: str | None = "actor-1") -> IdentityRef:
     return IdentityRef(
-        platform="onebot11",
+        platform="qq_official",
         user_id=user_id,
         display_name="测试用户" if user_id is not None else None,
         card=None,
@@ -52,21 +52,21 @@ def identity(user_id: str | None = "actor-1") -> IdentityRef:
 
 def message(
     *segments: object,
-    platform: str = "onebot11",
-    message_type: str | None = "group",
+    platform: str = "qq_official",
+    sub_type: str | None = "GROUP_MESSAGE_CREATE",
     group_id: str | None = "synthetic-group",
     timestamp: datetime | None = COMMAND_TIME,
-    actor_id: str | None = "actor-1",
+    platform_message_id: str | None = "message-1",
     provenance: ProvenanceSource = ProvenanceSource.DIRECT_EVENT,
 ) -> InternalMessage:
-    actor = identity(actor_id)
+    actor = identity()
     return InternalMessage(
         platform=platform,
         source_raw_event_id=1,
-        platform_message_id="message-1",
+        platform_message_id=platform_message_id,
         context=MessageContext(
-            message_type=message_type,
-            sub_type=None,
+            message_type="0",
+            sub_type=sub_type,
             group_id=group_id,
         ),
         actor=actor,
@@ -82,7 +82,7 @@ def message(
 
 def result() -> SummaryResult:
     return SummaryResult(
-        platform="onebot11",
+        platform="qq_official",
         group_id="synthetic-group",
         start_time=COMMAND_TIME,
         end_time=COMMAND_TIME,
@@ -153,13 +153,19 @@ class FakeSummaryRepository:
 class FakeSender:
     def __init__(self, *, error: Exception | None = None, events: list[str] | None = None) -> None:
         self.error = error
-        self.calls: list[tuple[str, str]] = []
+        self.calls: list[tuple[str, str, str | None]] = []
         self.events = events
 
-    async def send_group_message(self, group_id: str, text: str) -> object:
+    async def send_group_message(
+        self,
+        group_id: str,
+        text: str,
+        *,
+        msg_id: str | None = None,
+    ) -> object:
         if self.events is not None:
             self.events.append("send")
-        self.calls.append((group_id, text))
+        self.calls.append((group_id, text, msg_id))
         if self.error is not None:
             raise self.error
         return object()
@@ -268,42 +274,28 @@ def test_nested_reply_forward_and_image_metadata_never_trigger() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("candidate", "post_type", "self_id"),
+    "candidate",
     [
-        (message(message_type="private", group_id=None), "message", "bot-1"),
-        (message(group_id=None), "message", "bot-1"),
-        (message(timestamp=None), "message", "bot-1"),
-        (
-            message(timestamp=datetime(2026, 8, 10, 12)),
-            "message",
-            "bot-1",
-        ),
-        (message(platform="qq_official"), "message", "bot-1"),
-        (message(), "message_sent", "bot-1"),
-        (message(actor_id="bot-1"), "message", "bot-1"),
+        message(group_id=None),
+        message(timestamp=None),
+        message(timestamp=datetime(2026, 8, 10, 12)),
+        message(platform="other_platform"),
+        message(sub_type="GROUP_AT_MESSAGE_CREATE"),
+        message(platform_message_id=None),
     ],
     ids=[
-        "private",
         "missing-group",
         "missing-time",
         "naive-time",
         "other-platform",
-        "sent",
-        "self",
+        "wrong-event-type",
+        "missing-message-id",
     ],
 )
-async def test_invalid_context_never_generates(
-    candidate: InternalMessage,
-    post_type: str,
-    self_id: str,
-) -> None:
+async def test_invalid_context_never_generates(candidate: InternalMessage) -> None:
     command_handler, service, repository, sender = handler()
 
-    status = await command_handler.handle(
-        candidate,
-        post_type=post_type,
-        self_id=self_id,
-    )
+    status = await command_handler.handle(candidate)
 
     assert status is SummaryCommandStatus.INVALID_CONTEXT
     assert service.calls == []
@@ -315,7 +307,7 @@ async def test_invalid_context_never_generates(
 async def test_disabled_command_never_generates() -> None:
     command_handler, service, _, _ = handler(enabled=False)
 
-    status = await command_handler.handle(message(), post_type="message", self_id="bot")
+    status = await command_handler.handle(message())
 
     assert status is SummaryCommandStatus.DISABLED
     assert service.calls == []
@@ -338,17 +330,17 @@ async def test_window_persistence_and_send_order_are_explicit() -> None:
         sender=FakeSender(events=events),
     )
 
-    status = await command_handler.handle(message(), post_type="message", self_id="bot")
+    status = await command_handler.handle(message())
 
     assert status is SummaryCommandStatus.SUCCEEDED
     assert events == ["generate", "persist", "send"]
-    assert service.calls[0]["platform"] == "onebot11"
+    assert service.calls[0]["platform"] == "qq_official"
     assert service.calls[0]["group_id"] == "synthetic-group"
     assert service.calls[0]["start_time"] == COMMAND_TIME.replace(hour=10)
     assert service.calls[0]["end_time"] == COMMAND_TIME
     assert len(repository.results) == 1
     assert sender.calls == [
-        ("synthetic-group", "【群聊总结】\n\n安全摘要")
+        ("synthetic-group", "【群聊总结】\n\n安全摘要", "message-1")
     ]
 
 
@@ -357,13 +349,11 @@ async def test_cooldown_is_per_group_and_uses_injected_clock() -> None:
     current = [100.0]
     command_handler, service, _, _ = handler(clock=lambda: current[0])
 
-    first = await command_handler.handle(message(), post_type="message", self_id="bot")
-    second = await command_handler.handle(message(), post_type="message", self_id="bot")
-    other_group = await command_handler.handle(
-        message(group_id="other-group"), post_type="message", self_id="bot"
-    )
+    first = await command_handler.handle(message())
+    second = await command_handler.handle(message())
+    other_group = await command_handler.handle(message(group_id="other-group"))
     current[0] = 160.0
-    third = await command_handler.handle(message(), post_type="message", self_id="bot")
+    third = await command_handler.handle(message())
 
     assert first is SummaryCommandStatus.SUCCEEDED
     assert second is SummaryCommandStatus.COOLDOWN
@@ -377,11 +367,9 @@ async def test_concurrent_same_group_triggers_only_one_generation() -> None:
     service = BlockingSummaryService()
     command_handler, _, repository, sender = handler(service=service)
 
-    first_task = asyncio.create_task(
-        command_handler.handle(message(), post_type="message", self_id="bot")
-    )
+    first_task = asyncio.create_task(command_handler.handle(message()))
     await asyncio.wait_for(service.started.wait(), timeout=1)
-    second = await command_handler.handle(message(), post_type="message", self_id="bot")
+    second = await command_handler.handle(message())
     service.release.set()
     first = await asyncio.wait_for(first_task, timeout=1)
 
@@ -398,7 +386,7 @@ async def test_generation_failure_does_not_persist_or_send() -> None:
         service=FakeSummaryService(error=RuntimeError("synthetic failure"))
     )
 
-    status = await command_handler.handle(message(), post_type="message", self_id="bot")
+    status = await command_handler.handle(message())
 
     assert status is SummaryCommandStatus.GENERATION_FAILED
     assert len(service.calls) == 1
@@ -412,7 +400,7 @@ async def test_persistence_failure_prevents_send() -> None:
         repository=FakeSummaryRepository(error=RuntimeError("synthetic failure"))
     )
 
-    status = await command_handler.handle(message(), post_type="message", self_id="bot")
+    status = await command_handler.handle(message())
 
     assert status is SummaryCommandStatus.PERSISTENCE_FAILED
     assert len(service.calls) == 1
@@ -426,7 +414,7 @@ async def test_send_failure_keeps_persisted_summary_and_does_not_regenerate() ->
         sender=FakeSender(error=RuntimeError("synthetic failure"))
     )
 
-    status = await command_handler.handle(message(), post_type="message", self_id="bot")
+    status = await command_handler.handle(message())
 
     assert status is SummaryCommandStatus.SEND_FAILED
     assert len(service.calls) == 1

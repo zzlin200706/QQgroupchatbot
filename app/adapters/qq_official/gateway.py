@@ -20,7 +20,7 @@ from app.adapters.qq_official.auth import QQAccessToken
 
 logger = logging.getLogger(__name__)
 
-QQ_OFFICIAL_API_BASE_URL = "https://api.bot.qq.com"
+QQ_OFFICIAL_OPENAPI_BASE_URL = "https://api.bot.qq.com"
 QQ_OFFICIAL_GATEWAY_BOT_PATH = "/gateway/bot"
 GROUP_AND_C2C_EVENT_INTENT = 1 << 25
 GatewayEventHandler = Callable[["QQGatewayDispatch"], Awaitable[None] | None]
@@ -137,7 +137,7 @@ class QQOfficialGatewayClient:
         *,
         auth_client: AccessTokenProvider,
         event_handler: GatewayEventHandler | None = None,
-        api_base_url: str = QQ_OFFICIAL_API_BASE_URL,
+        api_base_url: str = QQ_OFFICIAL_OPENAPI_BASE_URL,
         timeout_seconds: float = 10.0,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:

@@ -70,7 +70,7 @@ class MessageContext:
 
 @dataclass(frozen=True)
 class InternalMessage:
-    """The parser's stable representation of one direct OneBot message event."""
+    """The parser's stable representation of one direct platform message event."""
 
     platform: str
     source_raw_event_id: int | None

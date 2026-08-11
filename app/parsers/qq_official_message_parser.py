@@ -33,6 +33,7 @@ from app.domain.messages.segments import (
     MessageSegment,
     ReplyResolutionStatus,
     ReplySegment,
+    ResolvedMessageReference,
     TextSegment,
     UnknownSegment,
 )
@@ -66,8 +67,8 @@ class QQOfficialMessageParser:
             return None
 
         raw_payload = copy.deepcopy(dict(payload))
-        actor = _identity(raw_payload.get("author"))
-        author = _identity(raw_payload.get("author"))
+        actor = _identity(raw_payload.get("author"), present_source=IdentitySource.EVENT)
+        author = _identity(raw_payload.get("author"), present_source=IdentitySource.EVENT)
         provenance = MessageProvenance(
             source_type=ProvenanceSource.DIRECT_EVENT,
             raw_event_id=raw_event_id,
@@ -80,7 +81,7 @@ class QQOfficialMessageParser:
             context=MessageContext(
                 message_type=message_type,
                 sub_type=_as_string(gateway.get("t")),
-                group_id=_as_string(raw_payload.get("group_id")),
+                group_id=_group_identifier(raw_payload),
             ),
             actor=actor,
             author=author,
@@ -110,8 +111,7 @@ class QQOfficialMessageParser:
         segments: list[MessageSegment] = []
         if message_type == _REPLY_MESSAGE_TYPE:
             segments.extend(self._reply_segments(payload, start_position=len(segments)))
-        segments.extend(self._content_segments(payload, start_position=len(segments)))
-        segments.extend(self._attachment_segments(payload, start_position=len(segments)))
+        segments.extend(self._message_like_segments(payload, start_position=len(segments)))
         return tuple(segments)
 
     def _reply_segments(
@@ -141,6 +141,7 @@ class QQOfficialMessageParser:
                 # tokens, not Gateway message IDs.  Preserve them in raw_data.
                 referenced_message_id=None,
                 resolution_status=ReplyResolutionStatus.UNRESOLVED,
+                resolved_message=self._resolved_reply_message(element),
                 raw_data={
                     "msg_element": copy.deepcopy(element),
                     "message_scene": copy.deepcopy(message_scene),
@@ -148,6 +149,37 @@ class QQOfficialMessageParser:
             )
             for index, element in enumerate(elements)
         ]
+
+    def _resolved_reply_message(
+        self,
+        element: object,
+    ) -> ResolvedMessageReference | None:
+        if not isinstance(element, Mapping):
+            return None
+        segments = tuple(self._message_like_segments(element, start_position=0))
+        if not segments:
+            return None
+        return ResolvedMessageReference(
+            platform_message_id=_as_string(element.get("id")),
+            author=_identity(
+                element.get("author"),
+                present_source=IdentitySource.RESOLVED_MESSAGE,
+                missing_source=IdentitySource.RESOLVED_MESSAGE,
+            ),
+            timestamp=_timestamp(element.get("timestamp")),
+            segments=segments,
+            raw_data=copy.deepcopy(dict(element)),
+        )
+
+    def _message_like_segments(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        start_position: int,
+    ) -> list[MessageSegment]:
+        segments = self._content_segments(payload, start_position=start_position)
+        segments.extend(self._attachment_segments(payload, start_position=start_position + len(segments)))
+        return segments
 
     def _content_segments(
         self,
@@ -274,17 +306,26 @@ class QQOfficialMessageParser:
         return segments
 
 
-def _identity(value: object) -> IdentityRef:
+def _identity(
+    value: object,
+    *,
+    present_source: IdentitySource,
+    missing_source: IdentitySource = IdentitySource.UNKNOWN,
+) -> IdentityRef:
     author = value if isinstance(value, Mapping) else {}
-    user_id = _as_string(author.get("id"))
+    user_id = _as_string(author.get("id")) or _as_string(author.get("member_openid"))
     return IdentityRef(
         platform="qq_official",
         user_id=user_id,
         display_name=_as_string(author.get("username")),
         card=None,
-        source=IdentitySource.EVENT if user_id is not None else IdentitySource.UNKNOWN,
+        source=present_source if user_id is not None else missing_source,
         availability=IdentityAvailability.KNOWN if user_id is not None else IdentityAvailability.UNAVAILABLE,
     )
+
+
+def _group_identifier(payload: Mapping[str, Any]) -> str | None:
+    return _as_string(payload.get("group_openid")) or _as_string(payload.get("group_id"))
 
 
 def _as_string(value: object) -> str | None:

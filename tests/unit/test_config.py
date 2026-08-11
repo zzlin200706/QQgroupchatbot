@@ -9,6 +9,9 @@ from app.config import Settings
 def test_phase_h_defaults_and_secret_redaction() -> None:
     settings = Settings(_env_file=None, deepseek_api_key="private-test-key")
 
+    assert settings.qq_api_timeout_seconds == 10
+    assert settings.qq_gateway_reconnect_initial_delay_seconds == 1
+    assert settings.qq_gateway_reconnect_max_delay_seconds == 30
     assert settings.deepseek_base_url == "https://api.deepseek.com"
     assert settings.deepseek_model == "deepseek-v4-flash"
     assert settings.deepseek_timeout_seconds == 60

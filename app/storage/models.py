@@ -34,7 +34,7 @@ class Base(DeclarativeBase):
 
 
 class RawEvent(Base):
-    """One receipt of a complete OneBot business-event payload.
+    """One receipt of a complete platform business-event payload.
 
     The extracted columns are optional indexes only. `raw_payload` remains the
     authoritative, lossless input for later normalization and parsing.

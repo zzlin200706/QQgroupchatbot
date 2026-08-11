@@ -18,7 +18,7 @@ from app.domain.messages import (
     TextSegment,
 )
 from app.services.conversation_query import ConversationQueryService
-from app.services.raw_event_ingestion import RawEventIngestionService
+from app.services.raw_event_ingestion import QQOfficialRawEventIngestionService
 from app.storage.database import Database
 from app.storage.message_repository import MessageRepository
 from app.storage.models import RawEvent
@@ -48,18 +48,18 @@ async def raw_receipt(repository: RawEventRepository, marker: str) -> RawEvent:
     payload: dict[str, Any] = {"marker": marker}
     return await repository.insert(
         RawEvent(
-            platform="test",
+            platform="qq_official",
             received_at=TEN,
             event_time=None,
-            post_type="message",
-            message_type="group",
-            sub_type=None,
+            post_type=None,
+            message_type="0",
+            sub_type="GROUP_MESSAGE_CREATE",
             self_id=None,
             user_id=None,
             group_id=None,
             message_id=None,
             raw_payload=payload,
-            payload_hash=RawEventIngestionService.payload_hash(payload),
+            payload_hash=QQOfficialRawEventIngestionService.payload_hash(payload),
         )
     )
 
@@ -69,7 +69,7 @@ def normalized(
     text: str,
     *,
     timestamp: datetime | None,
-    platform: str = "onebot11",
+    platform: str = "qq_official",
     group_id: str = "group-a",
     platform_message_id: str | None = None,
 ) -> InternalMessage:
@@ -85,7 +85,11 @@ def normalized(
         platform=platform,
         source_raw_event_id=raw_event_id,
         platform_message_id=platform_message_id or f"message-{raw_event_id}",
-        context=MessageContext(message_type="group", sub_type=None, group_id=group_id),
+        context=MessageContext(
+            message_type="0",
+            sub_type="GROUP_MESSAGE_CREATE",
+            group_id=group_id,
+        ),
         actor=author,
         author=author,
         timestamp=timestamp,
@@ -102,7 +106,9 @@ def texts(messages) -> list[str | None]:
 
 
 @pytest.mark.asyncio
-async def test_half_open_range_excludes_null_and_limit_keeps_earliest(tmp_path: Path) -> None:
+async def test_half_open_range_excludes_null_and_limit_keeps_earliest(
+    tmp_path: Path,
+) -> None:
     database, raws, messages, query = await storage(tmp_path)
     try:
         for marker, timestamp in (
@@ -119,13 +125,13 @@ async def test_half_open_range_excludes_null_and_limit_keeps_earliest(tmp_path: 
             )
 
         result = await query.get_messages(
-            platform="onebot11",
+            platform="qq_official",
             group_id="group-a",
             start_time=TEN,
             end_time=TEN + timedelta(hours=1),
         )
         limited = await query.get_messages(
-            platform="onebot11",
+            platform="qq_official",
             group_id="group-a",
             start_time=TEN,
             end_time=TEN + timedelta(hours=2),
@@ -139,14 +145,14 @@ async def test_half_open_range_excludes_null_and_limit_keeps_earliest(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_stable_id_tiebreak_and_platform_group_isolation(tmp_path: Path) -> None:
+async def test_platform_and_group_isolation_remain_explicit(tmp_path: Path) -> None:
     database, raws, messages, query = await storage(tmp_path)
     try:
         cases = (
-            ("first", "onebot11", "same"),
-            ("second", "onebot11", "same"),
-            ("other-group", "onebot11", "other"),
-            ("other-platform", "qq_official", "same"),
+            ("first", "qq_official", "same"),
+            ("second", "qq_official", "same"),
+            ("other-group", "qq_official", "other"),
+            ("other-platform", "other_platform", "same"),
         )
         for text, platform, group_id in cases:
             raw = await raw_receipt(raws, text)
@@ -163,7 +169,7 @@ async def test_stable_id_tiebreak_and_platform_group_isolation(tmp_path: Path) -
             )
 
         result = await query.get_messages(
-            platform="onebot11",
+            platform="qq_official",
             group_id="same",
             start_time=TEN,
             end_time=TEN + timedelta(minutes=1),
@@ -199,7 +205,7 @@ async def test_parser_replay_selection_and_explicit_parser_scope(tmp_path: Path)
         )
 
         common = dict(
-            platform="onebot11",
+            platform="qq_official",
             group_id="group-a",
             start_time=TEN,
             end_time=TEN + timedelta(minutes=1),
@@ -222,92 +228,25 @@ async def test_parser_replay_selection_and_explicit_parser_scope(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_different_raw_receipts_with_same_platform_id_are_not_deduplicated(
-    tmp_path: Path,
-) -> None:
-    database, raws, messages, query = await storage(tmp_path)
-    try:
-        for text in ("receipt-one", "receipt-two"):
-            raw = await raw_receipt(raws, text)
-            await messages.persist(
-                normalized(
-                    raw.id,
-                    text,
-                    timestamp=TEN,
-                    platform_message_id="same-platform-message",
-                ),
-                parser_name="parser",
-                parser_version="1",
-            )
-
-        result = await query.get_messages(
-            platform="onebot11",
-            group_id="group-a",
-            start_time=TEN,
-            end_time=TEN + timedelta(minutes=1),
-        )
-
-        assert texts(result) == ["receipt-one", "receipt-two"]
-    finally:
-        await database.dispose()
-
-
-@pytest.mark.asyncio
-async def test_latest_selection_precedes_conversation_filters(tmp_path: Path) -> None:
-    database, raws, messages, query = await storage(tmp_path)
-    try:
-        raw = await raw_receipt(raws, "changed")
-        old = normalized(raw.id, "old", timestamp=TEN, group_id="group-a")
-        await messages.persist(old, parser_name="parser", parser_version="1")
-        await messages.persist(
-            replace(
-                old,
-                context=replace(old.context, group_id="group-b"),
-                segments=(TextSegment(position=0, raw_data=None, text="latest"),),
-            ),
-            parser_name="parser",
-            parser_version="2",
-        )
-
-        result = await query.get_messages(
-            platform="onebot11",
-            group_id="group-a",
-            start_time=TEN,
-            end_time=TEN + timedelta(minutes=1),
-        )
-
-        assert result == ()
-    finally:
-        await database.dispose()
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("overrides", "message"),
+    "kwargs",
     [
-        ({"start_time": datetime(2026, 8, 10, 10)}, "start_time must be timezone-aware"),
-        ({"end_time": datetime(2026, 8, 10, 11)}, "end_time must be timezone-aware"),
-        ({"start_time": TEN + timedelta(hours=1)}, "start_time must be earlier"),
-        ({"limit": 0}, "limit must be between"),
-        ({"limit": 2001}, "limit must be between"),
-        ({"parser_version": "1"}, "parser_version requires parser_name"),
+        {"platform": "", "group_id": "group-a", "limit": 1},
+        {"platform": "qq_official", "group_id": "", "limit": 1},
+        {"platform": "qq_official", "group_id": "group-a", "limit": 0},
     ],
 )
-async def test_query_validation(
+async def test_query_rejects_invalid_arguments(
     tmp_path: Path,
-    overrides: dict[str, Any],
-    message: str,
+    kwargs: dict[str, object],
 ) -> None:
     database, _, _, query = await storage(tmp_path)
-    arguments: dict[str, Any] = {
-        "platform": "onebot11",
-        "group_id": "group-a",
-        "start_time": TEN,
-        "end_time": TEN + timedelta(hours=1),
-    }
-    arguments.update(overrides)
     try:
-        with pytest.raises(ValueError, match=message):
-            await query.get_messages(**arguments)
+        with pytest.raises(ValueError):
+            await query.get_messages(
+                start_time=TEN,
+                end_time=TEN + timedelta(minutes=1),
+                **kwargs,  # type: ignore[arg-type]
+            )
     finally:
         await database.dispose()

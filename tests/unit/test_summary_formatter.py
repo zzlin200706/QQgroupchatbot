@@ -8,7 +8,7 @@ from app.rendering import SummaryMessageFormatter
 
 def result(**overrides: object) -> SummaryResult:
     values: dict[str, object] = {
-        "platform": "onebot11",
+        "platform": "qq_official",
         "group_id": "synthetic-group",
         "start_time": datetime(2026, 8, 10, tzinfo=timezone.utc),
         "end_time": datetime(2026, 8, 11, tzinfo=timezone.utc),

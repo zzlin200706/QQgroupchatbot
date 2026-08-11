@@ -2,9 +2,9 @@
 
 from app.services.conversation_query import ConversationQueryService
 from app.services.normalized_message_ingestion import (
-    NormalizedMessageIngestionService,
+    QQOfficialNormalizedMessageIngestionService,
 )
-from app.services.reference_enrichment import ReferenceEnrichmentService
+from app.services.raw_event_ingestion import QQOfficialRawEventIngestionService
 from app.services.summary import SummaryService, SummaryWindowTooLarge
 from app.services.summary_command import (
     SummaryCommandHandler,
@@ -14,8 +14,8 @@ from app.services.summary_command import (
 
 __all__ = [
     "ConversationQueryService",
-    "NormalizedMessageIngestionService",
-    "ReferenceEnrichmentService",
+    "QQOfficialNormalizedMessageIngestionService",
+    "QQOfficialRawEventIngestionService",
     "SummaryService",
     "SummaryWindowTooLarge",
     "SummaryCommandHandler",

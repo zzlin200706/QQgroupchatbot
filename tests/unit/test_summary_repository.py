@@ -31,7 +31,7 @@ async def repository(
 
 def result(
     *,
-    platform: str = "onebot11",
+    platform: str = "qq_official",
     group_id: str = "group-a",
     summary: str = "总体摘要",
     prompt_tokens: int | None = 100,
@@ -178,7 +178,7 @@ async def test_same_window_creates_distinct_history_rows_in_stable_newest_order(
         second = await summaries.persist(result(summary="run-two"))
         third = await summaries.persist(result(summary="run-three"))
         history = await summaries.list_for_group(
-            platform="onebot11",
+            platform="qq_official",
             group_id="group-a",
         )
 
@@ -197,30 +197,30 @@ async def test_same_window_creates_distinct_history_rows_in_stable_newest_order(
 async def test_group_platform_isolation_and_limit(tmp_path: Path) -> None:
     database, summaries = await repository(tmp_path)
     try:
-        onebot_a_1 = await summaries.persist(result(summary="onebot-a-one"))
-        onebot_a_2 = await summaries.persist(result(summary="onebot-a-two"))
-        await summaries.persist(result(group_id="group-b", summary="onebot-b"))
+        official_a_1 = await summaries.persist(result(summary="official-a-one"))
+        official_a_2 = await summaries.persist(result(summary="official-a-two"))
+        await summaries.persist(result(group_id="group-b", summary="official-b"))
         await summaries.persist(
-            result(platform="qq_official", group_id="group-a", summary="official-a")
+            result(platform="other_platform", group_id="group-a", summary="other-a")
         )
 
-        onebot_a = await summaries.list_for_group(
-            platform="onebot11",
-            group_id="group-a",
-        )
         official_a = await summaries.list_for_group(
             platform="qq_official",
             group_id="group-a",
         )
+        other_platform = await summaries.list_for_group(
+            platform="other_platform",
+            group_id="group-a",
+        )
         limited = await summaries.list_for_group(
-            platform="onebot11",
+            platform="qq_official",
             group_id="group-a",
             limit=1,
         )
 
-        assert [item.id for item in onebot_a] == [onebot_a_2.id, onebot_a_1.id]
-        assert [item.result.summary for item in official_a] == ["official-a"]
-        assert [item.id for item in limited] == [onebot_a_2.id]
+        assert [item.id for item in official_a] == [official_a_2.id, official_a_1.id]
+        assert [item.result.summary for item in other_platform] == ["other-a"]
+        assert [item.id for item in limited] == [official_a_2.id]
     finally:
         await database.dispose()
 
@@ -230,9 +230,9 @@ async def test_group_platform_isolation_and_limit(tmp_path: Path) -> None:
     "kwargs",
     [
         {"platform": "", "group_id": "group-a", "limit": 1},
-        {"platform": "onebot11", "group_id": "", "limit": 1},
-        {"platform": "onebot11", "group_id": "group-a", "limit": 0},
-        {"platform": "onebot11", "group_id": "group-a", "limit": -1},
+        {"platform": "qq_official", "group_id": "", "limit": 1},
+        {"platform": "qq_official", "group_id": "group-a", "limit": 0},
+        {"platform": "qq_official", "group_id": "group-a", "limit": -1},
     ],
 )
 async def test_history_query_rejects_invalid_arguments(

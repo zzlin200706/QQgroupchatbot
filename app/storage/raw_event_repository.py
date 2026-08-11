@@ -1,4 +1,4 @@
-"""Repository operations for raw OneBot event receipts."""
+"""Repository operations for raw event receipts."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""OneBot-only orchestration for the exact manual ``#总结`` command."""
+"""QQ Official orchestration for the exact manual ``#总结`` command."""
 
 from __future__ import annotations
 
@@ -41,7 +41,13 @@ class _SummaryStore(Protocol):
 
 
 class _GroupMessageSender(Protocol):
-    async def send_group_message(self, group_id: str, message: str) -> object: ...
+    async def send_group_message(
+        self,
+        group_id: str,
+        message: str,
+        *,
+        msg_id: str | None = None,
+    ) -> object: ...
 
 
 def is_summary_command(message: InternalMessage) -> bool:
@@ -90,9 +96,6 @@ class SummaryCommandHandler:
     async def handle(
         self,
         message: InternalMessage,
-        *,
-        post_type: str | None,
-        self_id: str | None,
     ) -> SummaryCommandStatus:
         """Handle a normalized inbound event without exposing failures upstream."""
 
@@ -100,7 +103,7 @@ class SummaryCommandHandler:
             return SummaryCommandStatus.DISABLED
         if not is_summary_command(message):
             return SummaryCommandStatus.NOT_COMMAND
-        if not self._valid_context(message, post_type=post_type, self_id=self_id):
+        if not self._valid_context(message):
             return SummaryCommandStatus.INVALID_CONTEXT
 
         group_id = message.context.group_id
@@ -142,7 +145,11 @@ class SummaryCommandHandler:
 
             outbound = self._formatter.format(result)
             try:
-                await self._sender.send_group_message(group_id, outbound)
+                await self._sender.send_group_message(
+                    group_id,
+                    outbound,
+                    msg_id=message.platform_message_id,
+                )
                 logger.info("summary send succeeded")
                 return SummaryCommandStatus.SUCCEEDED
             except Exception as error:
@@ -156,25 +163,17 @@ class SummaryCommandHandler:
                 self._active_groups.discard(key)
 
     @staticmethod
-    def _valid_context(
-        message: InternalMessage,
-        *,
-        post_type: str | None,
-        self_id: str | None,
-    ) -> bool:
-        if post_type != "message":
+    def _valid_context(message: InternalMessage) -> bool:
+        if message.platform != "qq_official":
             return False
-        if message.platform != "onebot11":
-            return False
-        if message.context.message_type != "group":
+        if message.context.sub_type != "GROUP_MESSAGE_CREATE":
             return False
         if not message.context.group_id:
             return False
+        if not message.platform_message_id:
+            return False
         timestamp = message.timestamp
         if timestamp is None or timestamp.tzinfo is None or timestamp.utcoffset() is None:
-            return False
-        actor_id = message.actor.user_id
-        if self_id is not None and actor_id is not None and self_id == actor_id:
             return False
         return True
 

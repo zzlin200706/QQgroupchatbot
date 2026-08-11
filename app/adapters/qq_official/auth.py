@@ -8,8 +8,8 @@ from typing import Any, Mapping
 import httpx
 
 
-# QQ Official Bot documentation, updated 2026-07-21:
-# https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/interface-framework/api-use.html
+# QQ Official Bot documentation, checked 2026-08-11:
+# https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/access-token.html
 QQ_OFFICIAL_ACCESS_TOKEN_URL = "https://api.bot.qq.com/app/getAppAccessToken"
 
 
