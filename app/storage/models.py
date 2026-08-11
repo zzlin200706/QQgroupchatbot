@@ -229,3 +229,78 @@ class SummaryRecord(Base):
     prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class AssistantTriggerClaimRecord(Base):
+    """One durable idempotency claim for a logical assistant trigger."""
+
+    __tablename__ = "assistant_trigger_claims"
+    __table_args__ = (
+        UniqueConstraint(
+            "platform",
+            "group_id",
+            "trigger_message_id",
+            "trigger_type",
+            name="uq_assistant_trigger_claim",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    platform: Mapped[str] = mapped_column(String(32), nullable=False)
+    group_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    trigger_message_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    trigger_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    claimed_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class AssistantInteractionRecord(Base):
+    """One assistant answer that was successfully delivered to QQ."""
+
+    __tablename__ = "assistant_interactions"
+    __table_args__ = (
+        UniqueConstraint(
+            "platform",
+            "group_id",
+            "trigger_message_id",
+            "trigger_type",
+            name="uq_assistant_successful_interaction",
+        ),
+        Index(
+            "ix_assistant_interactions_group_trigger_time",
+            "platform",
+            "group_id",
+            "trigger_timestamp",
+        ),
+        Index(
+            "ix_assistant_interactions_response_message",
+            "platform",
+            "group_id",
+            "response_message_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    platform: Mapped[str] = mapped_column(String(32), nullable=False)
+    group_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    trigger_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    trigger_message_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    trigger_timestamp: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+    requester_user_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    requester_display_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    requester_card: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    requester_source: Mapped[str] = mapped_column(String(32), nullable=False)
+    requester_availability: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    answer: Mapped[str] = mapped_column(Text, nullable=False)
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    model: Mapped[str] = mapped_column(String(128), nullable=False)
+    finish_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    prompt_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    input_chars: Mapped[int] = mapped_column(Integer, nullable=False)
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    response_message_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)

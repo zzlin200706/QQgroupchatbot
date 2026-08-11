@@ -10,7 +10,7 @@ from typing import Any, Protocol
 
 from app.adapters.qq_official.inbound import QQOfficialInboundEvent
 from app.domain.messages import InternalMessage
-from app.services.command_dispatch import QQOfficialCommandDispatcher
+from app.services.interaction_dispatch import QQOfficialInteractionDispatcher
 from app.services.normalized_message_ingestion import (
     QQOfficialNormalizedMessageIngestionService,
 )
@@ -36,7 +36,13 @@ class QQOfficialEventProcessResult:
     raw_persisted: bool
     normalized_persisted: bool
     raw_event_id: int | None
-    command_name: str | None
+    interaction_name: str | None
+
+    @property
+    def command_name(self) -> str | None:
+        """Backward-compatible alias for Phase M diagnostics."""
+
+        return self.interaction_name
 
 
 class QQOfficialEventProcessor:
@@ -47,14 +53,14 @@ class QQOfficialEventProcessor:
         *,
         raw_ingestion_service: QQOfficialRawEventIngestionService,
         normalized_ingestion_service: QQOfficialNormalizedMessageIngestionService,
-        command_dispatcher: QQOfficialCommandDispatcher,
+        interaction_dispatcher: QQOfficialInteractionDispatcher,
         task_factory: _TaskFactory = asyncio.create_task,
     ) -> None:
         self._raw_ingestion_service = raw_ingestion_service
         self._normalized_ingestion_service = normalized_ingestion_service
-        self._command_dispatcher = command_dispatcher
+        self._interaction_dispatcher = interaction_dispatcher
         self._task_factory = task_factory
-        self._command_tasks: set[asyncio.Task[object]] = set()
+        self._interaction_tasks: set[asyncio.Task[object]] = set()
 
     async def process(
         self,
@@ -68,7 +74,7 @@ class QQOfficialEventProcessor:
                 raw_persisted=False,
                 normalized_persisted=False,
                 raw_event_id=None,
-                command_name=None,
+                interaction_name=None,
             )
 
         normalized = await self._normalized_ingestion_service.ingest(raw_event)
@@ -79,12 +85,15 @@ class QQOfficialEventProcessor:
                 raw_persisted=True,
                 normalized_persisted=False,
                 raw_event_id=raw_event.id,
-                command_name=None,
+                interaction_name=None,
             )
 
-        command_name = self._command_dispatcher.command_name(normalized)
-        if command_name is not None:
-            self._schedule_command(command_name=command_name, message=normalized)
+        interaction_name = self._interaction_dispatcher.interaction_name(normalized)
+        if interaction_name is not None:
+            self._schedule_interaction(
+                interaction_name=interaction_name,
+                message=normalized,
+            )
 
         return QQOfficialEventProcessResult(
             transport=event.transport,
@@ -92,42 +101,42 @@ class QQOfficialEventProcessor:
             raw_persisted=True,
             normalized_persisted=True,
             raw_event_id=raw_event.id,
-            command_name=command_name,
+            interaction_name=interaction_name,
         )
 
     async def drain(self) -> None:
-        tasks = tuple(self._command_tasks)
+        tasks = tuple(self._interaction_tasks)
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def aclose(self) -> None:
-        tasks = tuple(self._command_tasks)
+        tasks = tuple(self._interaction_tasks)
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    def _schedule_command(
+    def _schedule_interaction(
         self,
         *,
-        command_name: str,
+        interaction_name: str,
         message: InternalMessage,
     ) -> None:
         task = self._task_factory(
-            self._command_dispatcher.handle(message),
-            name=f"qq-official-{command_name}-command",
+            self._interaction_dispatcher.handle(message),
+            name=f"qq-official-{interaction_name}-interaction",
         )
-        self._command_tasks.add(task)
+        self._interaction_tasks.add(task)
         task.add_done_callback(self._command_task_finished)
 
     def _command_task_finished(self, task: asyncio.Task[object]) -> None:
-        self._command_tasks.discard(task)
+        self._interaction_tasks.discard(task)
         if task.cancelled():
             return
         error = task.exception()
         if error is not None:
             logger.error(
-                "qq official command task failed task_name=%s error_type=%s",
+                "qq official interaction task failed task_name=%s error_type=%s",
                 task.get_name(),
                 type(error).__name__,
             )

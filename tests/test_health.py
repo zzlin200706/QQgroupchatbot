@@ -9,6 +9,7 @@ import pytest
 
 import app.main as main_module
 from app.config import Settings
+from app.llm import LLMRequest, LLMResponse
 
 
 @pytest.mark.asyncio
@@ -92,3 +93,48 @@ def test_configure_logging_uses_settings_level(monkeypatch: pytest.MonkeyPatch) 
         root.setLevel(original_level)
 
     assert calls == {"basicConfig": logging.DEBUG}
+
+
+@pytest.mark.asyncio
+async def test_summary_and_assistant_share_one_provider_lifecycle(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProvider:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        async def complete(self, request: LLMRequest) -> LLMResponse:
+            raise AssertionError(f"provider should not be called: {request}")
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+
+    provider = FakeProvider()
+    create_calls: list[Settings] = []
+
+    def create_provider(settings: Settings) -> FakeProvider:
+        create_calls.append(settings)
+        return provider
+
+    monkeypatch.setattr(main_module, "create_llm_provider", create_provider)
+    app = main_module.create_app(
+        Settings(
+            _env_file=None,
+            app_env="test",
+            qq_event_transport="webhook",
+            qq_bot_app_id="test-app-id",
+            qq_bot_app_secret="test-app-secret",
+            database_url=f"sqlite+aiosqlite:///{tmp_path / 'shared-provider.db'}",
+            summary_command_enabled=True,
+            group_assistant_enabled=True,
+        )
+    )
+
+    async with app.router.lifespan_context(app):
+        assert app.state.llm_provider is provider
+        assert app.state.summary_command_handler is not None
+        assert app.state.group_assistant_handler is not None
+        assert len(create_calls) == 1
+
+    assert provider.close_calls == 1

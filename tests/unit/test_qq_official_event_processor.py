@@ -121,17 +121,17 @@ class FakeDispatcher:
     def __init__(
         self,
         *,
-        command_name: str | None,
+        interaction_name: str | None,
         error: Exception | None = None,
     ) -> None:
-        self._command_name = command_name
+        self._interaction_name = interaction_name
         self._error = error
-        self.command_name_calls: list[InternalMessage] = []
+        self.interaction_name_calls: list[InternalMessage] = []
         self.handle_calls: list[InternalMessage] = []
 
-    def command_name(self, message: InternalMessage) -> str | None:
-        self.command_name_calls.append(message)
-        return self._command_name
+    def interaction_name(self, message: InternalMessage) -> str | None:
+        self.interaction_name_calls.append(message)
+        return self._interaction_name
 
     async def handle(self, message: InternalMessage) -> object:
         self.handle_calls.append(message)
@@ -145,11 +145,11 @@ class FakeDispatcher:
 async def test_process_persists_raw_before_normalized_and_ignores_ordinary_message() -> None:
     raw = FakeRawIngestion(result=raw_event())
     normalized = FakeNormalizedIngestion(result=internal_message("hello"))
-    dispatcher = FakeDispatcher(command_name=None)
+    dispatcher = FakeDispatcher(interaction_name=None)
     processor = QQOfficialEventProcessor(
         raw_ingestion_service=raw,
         normalized_ingestion_service=normalized,
-        command_dispatcher=dispatcher,
+        interaction_dispatcher=dispatcher,
     )
 
     result = await processor.process(inbound_event("hello"))
@@ -159,7 +159,7 @@ async def test_process_persists_raw_before_normalized_and_ignores_ordinary_messa
     assert result.command_name is None
     assert len(raw.calls) == 1
     assert len(normalized.calls) == 1
-    assert len(dispatcher.command_name_calls) == 1
+    assert len(dispatcher.interaction_name_calls) == 1
     assert dispatcher.handle_calls == []
 
 
@@ -167,11 +167,11 @@ async def test_process_persists_raw_before_normalized_and_ignores_ordinary_messa
 async def test_ping_schedules_ping_handler_only() -> None:
     raw = FakeRawIngestion(result=raw_event())
     normalized = FakeNormalizedIngestion(result=internal_message("#ping"))
-    dispatcher = FakeDispatcher(command_name="ping")
+    dispatcher = FakeDispatcher(interaction_name="ping")
     processor = QQOfficialEventProcessor(
         raw_ingestion_service=raw,
         normalized_ingestion_service=normalized,
-        command_dispatcher=dispatcher,
+        interaction_dispatcher=dispatcher,
     )
 
     result = await processor.process(inbound_event("#ping"))
@@ -186,11 +186,11 @@ async def test_ping_schedules_ping_handler_only() -> None:
 async def test_summary_schedules_summary_handler_only() -> None:
     raw = FakeRawIngestion(result=raw_event())
     normalized = FakeNormalizedIngestion(result=internal_message("#总结"))
-    dispatcher = FakeDispatcher(command_name="summary")
+    dispatcher = FakeDispatcher(interaction_name="summary")
     processor = QQOfficialEventProcessor(
         raw_ingestion_service=raw,
         normalized_ingestion_service=normalized,
-        command_dispatcher=dispatcher,
+        interaction_dispatcher=dispatcher,
     )
 
     result = await processor.process(inbound_event("#总结"))
@@ -205,11 +205,11 @@ async def test_summary_schedules_summary_handler_only() -> None:
 async def test_raw_persistence_failure_does_not_masquerade_as_success() -> None:
     raw = FakeRawIngestion(result=None)
     normalized = FakeNormalizedIngestion(result=internal_message("hello"))
-    dispatcher = FakeDispatcher(command_name=None)
+    dispatcher = FakeDispatcher(interaction_name=None)
     processor = QQOfficialEventProcessor(
         raw_ingestion_service=raw,
         normalized_ingestion_service=normalized,
-        command_dispatcher=dispatcher,
+        interaction_dispatcher=dispatcher,
     )
 
     result = await processor.process(inbound_event("hello"))
@@ -217,25 +217,25 @@ async def test_raw_persistence_failure_does_not_masquerade_as_success() -> None:
     assert result.raw_persisted is False
     assert result.normalized_persisted is False
     assert normalized.calls == []
-    assert dispatcher.command_name_calls == []
+    assert dispatcher.interaction_name_calls == []
 
 
 @pytest.mark.asyncio
 async def test_parser_failure_keeps_raw_and_skips_command() -> None:
     raw = FakeRawIngestion(result=raw_event())
     normalized = FakeNormalizedIngestion(result=None)
-    dispatcher = FakeDispatcher(command_name="ping")
+    dispatcher = FakeDispatcher(interaction_name="ping")
     processor = QQOfficialEventProcessor(
         raw_ingestion_service=raw,
         normalized_ingestion_service=normalized,
-        command_dispatcher=dispatcher,
+        interaction_dispatcher=dispatcher,
     )
 
     result = await processor.process(inbound_event("hello"))
 
     assert result.raw_persisted is True
     assert result.normalized_persisted is False
-    assert dispatcher.command_name_calls == []
+    assert dispatcher.interaction_name_calls == []
     assert dispatcher.handle_calls == []
 
 
@@ -245,16 +245,16 @@ async def test_command_task_failure_is_logged_without_raising(
 ) -> None:
     raw = FakeRawIngestion(result=raw_event())
     normalized = FakeNormalizedIngestion(result=internal_message("#ping"))
-    dispatcher = FakeDispatcher(command_name="ping", error=RuntimeError("boom"))
+    dispatcher = FakeDispatcher(interaction_name="ping", error=RuntimeError("boom"))
     processor = QQOfficialEventProcessor(
         raw_ingestion_service=raw,
         normalized_ingestion_service=normalized,
-        command_dispatcher=dispatcher,
+        interaction_dispatcher=dispatcher,
     )
     caplog.set_level("ERROR", logger="app.services.qq_official_event_processor")
 
     await processor.process(inbound_event("#ping"))
     await processor.drain()
 
-    assert "qq official command task failed" in caplog.text
+    assert "qq official interaction task failed" in caplog.text
     assert "boom" not in caplog.text

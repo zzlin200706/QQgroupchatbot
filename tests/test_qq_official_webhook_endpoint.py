@@ -42,7 +42,7 @@ class FakeProcessor:
             raw_persisted=True,
             normalized_persisted=True,
             raw_event_id=1,
-            command_name=None,
+            interaction_name=None,
         )
 
 

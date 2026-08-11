@@ -458,7 +458,7 @@ def test_identity_labels_timezone_and_truncation_are_explicit() -> None:
     ("filename", "expected"),
     [
         ("001_text.json", "phase-d-test-001"),
-        ("002_at_bot.json", "@用户"),
+        ("002_at_bot.json", "@Christina"),
         ("004_image.json", "[图片]"),
         ("009_file.json", "[文件:"),
     ],

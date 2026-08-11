@@ -41,30 +41,33 @@ MessageRepository
         ↓
 SQLite
         ↓
-ConversationQueryService
+QQOfficialInteractionDispatcher
+├── QQOfficialCommandDispatcher
+│   ├── #ping
+│   └── #总结 → SummaryService
+└── GroupAssistantHandler
+    ├── #问 → grounded QA
+    └── structured @bot → contextual chat
+        ↓
+GroupAssistantContextBuilder
+        ↓
+ConversationQueryService + AssistantInteractionRepository
         ↓
 MessageRenderer
         ↓
-SummaryService
-        ↓
-LLMProvider
-        ↓
-validated SummaryResult
-        ↓
-SummaryRepository
-        ↓
-SummaryMessageFormatter
+shared LLMProvider
         ↓
 QQOfficialGroupMessageSender
         ↓
-QQ Official passive reply
+successful assistant_interactions persistence
 ```
 
 其中：
 
-- `raw_events`、`messages`、`message_nodes`、`summaries` 都在同一个 SQLite 中
+- `raw_events`、`messages`、`message_nodes`、`summaries`、`assistant_interactions` 和 assistant trigger claims 都在同一个 SQLite 中
 - `FastAPI` 当前提供 `/health`、应用生命周期托管和 QQ Official webhook endpoint
 - `SUMMARY_COMMAND_ENABLED=false` 时，不启动 summary handler，但 raw/normalized persistence 仍正常工作
+- `GROUP_ASSISTANT_ENABLED=false` 时，`#问` / `@bot` 不触发 LLM，但入站消息仍照常持久化
 - 当前 summary reply 只走由入站消息触发的被动回复链路，不把“只有 `group_id` 的主动群发”当作当前 phase 范围
 - 当前 inbound transport 由 `QQ_EVENT_TRANSPORT` 选择，默认仍为 `websocket`
 - webhook 架构已经通过自动化验证，真实 QQ webhook smoke 仍 pending
@@ -93,6 +96,7 @@ QQ Official passive reply
 - `raw_event_repository.py`
 - `message_repository.py`
 - `summary_repository.py`
+- `assistant_interaction_repository.py`
 - `message_codec.py` / `summary_codec.py`
 
 ### `app/services/`
@@ -103,6 +107,10 @@ QQ Official passive reply
 - `ConversationQueryService`
 - `SummaryService`
 - `SummaryCommandHandler`
+- `QQOfficialInteractionDispatcher`
+- `GroupAssistantContextBuilder`
+- `GroupAssistantService`
+- `GroupAssistantHandler`
 
 ### `app/rendering/`
 
@@ -114,6 +122,7 @@ QQ Official passive reply
 - `LLMRequest` / `LLMResponse`
 - `LLMProvider` 协议
 - `DeepSeekProvider`
+- `OpenAICompatibleProvider`
 
 ## 当前组件边界
 
@@ -135,9 +144,9 @@ QQ Official passive reply
 
 ### Event Processor
 
-- 负责 `QQOfficialInboundEvent → raw → normalized → command dispatch`
+- 负责 `QQOfficialInboundEvent → raw → normalized → interaction dispatch`
 - WebSocket 与 Webhook 共用同一条业务链
-- command 仍以后台 task 形式执行，不让 transport 层直接触发 LLM 细节
+- command / assistant interaction 仍以后台 task 形式执行，不让 transport 层等待 LLM
 
 ### Raw Event Ingestion
 
@@ -171,6 +180,7 @@ QQ Official passive reply
 - `message_type == 102`：保存为 unresolved `ForwardSegment`
 - `message_type == 103`：reply 只保存 opaque `msg_elements` / `message_scene`
 - mention 只有在 `content` token 与 `mentions[]` 明确对应时才生成 `AtSegment`
+- mention 的 `is_self` 只来自明确布尔 `mentions[].is_you`；`GROUP_AT_MESSAGE_CREATE` 由官方事件类型确认 Bot mention
 - 未确认结构一律保留为 `UnknownSegment`
 
 未来如果需要 reply / forward 补全，应该通过概念接口实现，而不是把某个平台 action 名称写死成领域边界。例如：
@@ -191,6 +201,8 @@ class MessageReferenceResolver:
 - `raw_events` 是 parser replay 和字段追溯的事实源头
 - `messages + message_nodes` 当前用于保存可重建的 `InternalMessage` 树
 - `summaries` 只保存 validated summary result 与最小必要元数据
+- `assistant_interactions` 只保存已经成功发送给 QQ 的 Bot turn；outbound 不伪造成 raw event 或 `InternalMessage`
+- `assistant_trigger_claims` 对 `(platform, group_id, trigger_message_id, trigger_type)` 做轻量持久化去重
 - 不保存 prompt、完整 conversation、provider body 或 secret
 
 ### Rendering
@@ -224,6 +236,15 @@ generate
 - `QQOfficialGroupMessageSender` 只负责 token、HTTP 请求与响应校验
 - 不做 prompt、上下文选择、summary 逻辑
 
+### Group Assistant
+
+- `#问` 只使用同 platform、同 group、当前 trigger 之前的 `InternalMessage`；历史 Bot 回答不进入 grounded evidence
+- `@bot` 使用最近群消息和同群成功 `assistant_interactions`，按 trigger timestamp 合并为 role-aware timeline
+- trigger 优先级是 `#ping → #总结 → #问 → structured @bot → ordinary`
+- 普通消息、普通图片、普通 forward 和无法确认目标的 reply 都不调用 LLM
+- 当前真实 reply sample 只有 opaque `REFIDX`，无法可靠映射到 outbound `message_id`；因此 reply-to-bot 自动触发暂不启用
+- assistant 顺序固定为 `claim trigger → generate → send → persist successful turn`
+
 ## LLM 边界
 
 当前 LLM 架构已经稳定为：
@@ -235,14 +256,14 @@ InternalMessage[]
         ↓
 MessageRenderer
         ↓
-SummaryService
+SummaryService / GroupAssistantService
         ↓
 LLMProvider
         ↓
-validated domain result
+validated domain result / AssistantResult
 ```
 
-`DeepSeekProvider` 只是当前第一个真实 provider，不是业务层依赖对象。
+`DeepSeekProvider` 和 `OpenAICompatibleProvider` 都由配置选择；summary 与 assistant 共享同一个 provider 实例和生命周期。
 
 禁止：
 
@@ -290,55 +311,41 @@ Bot Action / Outbound Service
 QQ Official OpenAPI
 ```
 
-AI 部分的 future 形态是：
+AI 部分当前形态是：
 
 ```text
 InternalMessage[]
         ↓
-ConversationContextService          # future
+GroupAssistantContextBuilder
         ↓
-MessageRenderer / MultimodalContentBuilder   # future
+MessageRenderer
         ↓
 LLMProvider
         ├── DeepSeekProvider
-        └── OpenAICompatibleProvider         # future
+        └── OpenAICompatibleProvider
         ↓
 validated domain result
 ```
 
-其中以下组件是 `future`，本次不是已实现功能：
+其中以下组件仍是 `future`：
 
-- `ConversationContextService`
-- `TriggerPolicy`
-- `ChatReplyService`
-- `QAService`
 - `MediaResolver`
 - `MultimodalPolicy`
 - `MultimodalContentBuilder`
-- `OpenAICompatibleProvider`
 
 ## 触发策略
 
-当前 runtime 只实现严格的 `#总结`：
+当前 runtime 的 precedence-aware trigger 是：
 
 ```text
-platform == "qq_official"
-provenance == direct_event
-sub_type == GROUP_MESSAGE_CREATE
-top-level exact text == #总结
-group_id exists
-platform_message_id exists
-timestamp is timezone-aware
+1. exact `#ping`
+2. exact `#总结`
+3. exact-prefix `#问 <问题>`
+4. `GROUP_AT_MESSAGE_CREATE` 或结构化 `AtSegment.is_self is True`
+5. ordinary message: no action
 ```
 
-未来扩展的触发边界应该通过 `TriggerPolicy` 表达，例如：
-
-- `SummaryCommandTrigger`
-- `MentionTrigger`
-- `ReplyTrigger`
-- `PendingInteractionTrigger`
-
-但这些都是 future，不要在当前业务逻辑里提前写死。
+一个 message 最多选择一个 handler。显示名称 substring 不作为 mention 证据；opaque reply 不作为 reply-to-bot 证据。
 
 ## Storage 路线
 
@@ -353,6 +360,8 @@ raw_events
 messages
 message_nodes
 summaries
+assistant_trigger_claims
+assistant_interactions
 ```
 
 这是当前有效实现，不要求为了“更规范”继续拆成更多子表。
@@ -399,7 +408,8 @@ app/
 │   └── qq_official/
 ├── domain/
 │   ├── messages/
-│   └── summaries/
+│   ├── summaries/
+│   └── assistant_interactions/
 ├── parsers/
 │   └── qq_official_message_parser.py
 ├── storage/
@@ -408,15 +418,16 @@ app/
 │   ├── conversation_query.py
 │   ├── summary.py
 │   ├── summary_command.py
-│   ├── conversation_context.py      # future
-│   ├── chat_reply.py                # future
+│   ├── group_assistant_context.py
+│   ├── group_assistant.py
+│   ├── group_assistant_handler.py
 │   └── media.py                     # future
 ├── llm/
 │   ├── models.py
 │   └── providers/
 │       ├── base.py
 │       ├── deepseek.py
-│       └── openai_compatible.py     # future
+│       └── openai_compatible.py
 └── bot_actions/
     └── qq_official/                 # future abstraction
 ```

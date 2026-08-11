@@ -86,6 +86,8 @@ def test_captured_mentions_are_structured_only_when_the_payload_confirms_the_tar
     at_segment = next(segment for segment in message.segments if isinstance(segment, AtSegment))
     assert at_segment.target == event["data"]["mentions"][0]["id"]
     assert at_segment.is_all is False
+    assert at_segment.display_name == event["data"]["mentions"][0]["username"]
+    assert at_segment.is_self is event["data"]["mentions"][0]["is_you"]
     assert at_segment.raw_data["mention"] == event["data"]["mentions"][0]
 
 

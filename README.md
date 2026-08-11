@@ -10,11 +10,8 @@
 - 核心原则是 `raw-first`：先保存 raw event，再做 parser 和上层处理
 - 领域边界是 `internal model first`：LLM、renderer、repository、summary command 只依赖 `InternalMessage`
 - 默认长期部署方案是 `SQLite + ./data/ + 单进程 asyncio`，不是多服务重基础设施
-- 当前唯一运行内 AI 功能是群聊 `#总结`
-- 当前 AI 路线固定为：
-  1. 先完成 `DeepSeekProvider` 的真实闭环验收
-  2. 再实现 `OpenAICompatibleProvider`
-  3. 最后再做图片多模态、聊天回复、QA
+- 当前文本 AI 功能包括群聊 `#总结`、grounded `#问` 和结构化 `@bot` 对话
+- 普通群消息只入库，不触发 LLM；图片、文件、RAG、工具调用仍未实现
 
 ## 当前实现
 
@@ -29,6 +26,10 @@
 - `OpenAICompatibleProvider`
 - QQ Official group passive reply sender
 - `#ping` / `#总结` command dispatch
+- `#问 <问题>` 当前群历史 grounded QA
+- `GROUP_AT_MESSAGE_CREATE` 或真实 sample 中 `mentions[].is_you=true` 的 `@bot` 对话
+- 成功 Bot 回答独立持久化到 `assistant_interactions`
+- 最近群消息与成功 assistant turns 的 group-scoped 多轮上下文
 - inbound transport selector: `QQ_EVENT_TRANSPORT=websocket|webhook` (default `websocket`)
 - FastAPI `/health` 和应用生命周期管理
 
@@ -44,18 +45,19 @@ QQ Official WebSocket / Webhook
 → InternalMessage
 → MessageRepository
 → SQLite
-→ ConversationQueryService
-→ MessageRenderer
-→ SummaryService
-→ LLMProvider (current: DeepSeekProvider)
-→ validated SummaryResult
-→ SummaryRepository
-→ SummaryMessageFormatter
-→ QQOfficialGroupMessageSender
-→ QQ Official passive reply
+→ QQOfficialInteractionDispatcher
+├── #ping → QQOfficialGroupMessageSender
+├── #总结 → SummaryService → SummaryRepository → QQOfficialGroupMessageSender
+└── #问 / @bot
+    → ConversationQueryService
+    → MessageRenderer
+    → GroupAssistantService
+    → configured LLMProvider
+    → QQOfficialGroupMessageSender
+    → AssistantInteractionRepository
 ```
 
-当 `SUMMARY_COMMAND_ENABLED=false` 时，当前 runtime 仍会继续做：
+当 `SUMMARY_COMMAND_ENABLED=false` 且 `GROUP_ASSISTANT_ENABLED=false` 时，runtime 仍会继续做：
 
 ```text
 inbound transport
@@ -64,7 +66,7 @@ inbound transport
 → normalized messages
 ```
 
-只是不会启动 `#总结` 的 LLM 闭环。
+只是不会启动对应 LLM 闭环。`.env.example` 推荐启用 assistant；代码默认关闭，避免无凭证环境启动即失败。
 
 当前默认 transport 仍是已真实 smoke 过的 `websocket`。Webhook 入站架构已完成代码与自动化验证，但真实 QQ webhook smoke 仍 pending。
 
@@ -76,6 +78,8 @@ inbound transport
 - parser 和 summary 失败都不能导致 raw event 丢失
 - `message_type == 102` 当前仍按 unresolved forward 保存
 - `message_type == 103` 当前只保留 reply 的 opaque 引用信息，不把 `ref_msg_idx` 伪装成真实消息 ID
+- 当前 reply sample 无法把 `REFIDX` 可靠映射到 Bot outbound message ID，因此 reply-to-bot 不自动触发 LLM
+- `#问` 不使用历史 Bot 回答作为事实；chat 才会把成功 Bot turn 标记为 assistant-generated context
 - 不允许把 forward tree 提前 flatten 成 `sender + text`
 - 不主动引入 `PostgreSQL`、`MySQL`、`Redis`、`Kafka`、`RabbitMQ`、`Celery`、`Elasticsearch`、独立向量数据库、`Kubernetes`、微服务
 

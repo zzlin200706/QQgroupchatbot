@@ -31,6 +31,16 @@ def test_phase_h_defaults_and_secret_redaction() -> None:
     assert settings.summary_command_enabled is False
     assert settings.summary_command_lookback_minutes == 120
     assert settings.summary_command_cooldown_seconds == 60
+    assert settings.group_assistant_enabled is False
+    assert settings.qa_lookback_minutes == 120
+    assert settings.qa_max_messages == 150
+    assert settings.chat_lookback_minutes == 30
+    assert settings.chat_max_messages == 80
+    assert settings.chat_max_assistant_turns == 20
+    assert settings.assistant_max_input_chars == 40000
+    assert settings.assistant_max_output_tokens == 1200
+    assert settings.assistant_max_output_chars == 4500
+    assert settings.assistant_cooldown_seconds == 3
     assert settings.deepseek_api_key.get_secret_value() == "private-test-key"
     assert (
         settings.openai_compatible_api_key.get_secret_value()
@@ -52,6 +62,15 @@ def test_phase_h_defaults_and_secret_redaction() -> None:
         {"summary_max_input_chars": 0},
         {"summary_command_lookback_minutes": 0},
         {"summary_command_cooldown_seconds": -1},
+        {"qa_lookback_minutes": 0},
+        {"qa_max_messages": 0},
+        {"chat_lookback_minutes": 0},
+        {"chat_max_messages": 0},
+        {"chat_max_assistant_turns": 0},
+        {"assistant_max_input_chars": 0},
+        {"assistant_max_output_tokens": 0},
+        {"assistant_max_output_chars": 127},
+        {"assistant_cooldown_seconds": -1},
     ],
 )
 def test_phase_h_numeric_settings_are_validated(override: dict[str, int]) -> None:

@@ -227,6 +227,15 @@ class QQOfficialMessageParser:
                     position=start_position + len(segments),
                     target=target,
                     is_all=False,
+                    display_name=(
+                        _as_string(mention.get("nickname"))
+                        or _as_string(mention.get("username"))
+                    ),
+                    is_self=(
+                        mention.get("is_you")
+                        if isinstance(mention.get("is_you"), bool)
+                        else None
+                    ),
                     raw_data={"token": match.group(0), "mention": copy.deepcopy(dict(mention))},
                 )
             )

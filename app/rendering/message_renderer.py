@@ -117,7 +117,10 @@ class MessageRenderer:
                 return "@全体成员"
             if segment.target is None:
                 return "@用户"
-            return "@" + names.get((platform, segment.target), "用户")
+            return "@" + names.get(
+                (platform, segment.target),
+                segment.display_name or "用户",
+            )
         if isinstance(segment, ImageSegment):
             return (
                 f"[图片: {_single_line(segment.summary)}]"

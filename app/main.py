@@ -29,6 +29,10 @@ from app.parsers.qq_official_message_parser import QQOfficialMessageParser
 from app.rendering import MessageRenderer, SummaryMessageFormatter
 from app.services.command_dispatch import QQOfficialCommandDispatcher
 from app.services.conversation_query import ConversationQueryService
+from app.services.group_assistant import GroupAssistantService
+from app.services.group_assistant_context import GroupAssistantContextBuilder
+from app.services.group_assistant_handler import GroupAssistantHandler
+from app.services.interaction_dispatch import QQOfficialInteractionDispatcher
 from app.services.normalized_message_ingestion import (
     QQOfficialNormalizedMessageIngestionService,
 )
@@ -38,6 +42,7 @@ from app.services.raw_event_ingestion import QQOfficialRawEventIngestionService
 from app.services.summary import SummaryService
 from app.services.summary_command import SummaryCommandHandler
 from app.storage.database import Database
+from app.storage.assistant_interaction_repository import AssistantInteractionRepository
 from app.storage.message_repository import MessageRepository
 from app.storage.raw_event_repository import RawEventRepository
 from app.storage.summary_repository import SummaryRepository
@@ -72,6 +77,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             parser=QQOfficialMessageParser(),
         )
         summary_repository = SummaryRepository(database.session_factory)
+        assistant_interaction_repository = AssistantInteractionRepository(
+            database.session_factory
+        )
         auth_client = QQOfficialAuthClient(
             app_id=app_settings.qq_bot_app_id,
             app_secret=app_settings.qq_bot_app_secret,
@@ -85,6 +93,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         ping_command_handler = PingCommandHandler(sender=group_message_sender)
         summary_command_handler: SummaryCommandHandler | None = None
+        assistant_handler: GroupAssistantHandler | None = None
         command_dispatcher = QQOfficialCommandDispatcher(
             ping_handler=ping_command_handler
         )
@@ -115,12 +124,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             )
                             continue
                         logger.info(
-                            "qq official inbound event processed transport=%s event_type=%s raw_event_id=%s normalized=%s command=%s",
+                            "qq official inbound event processed transport=%s event_type=%s raw_event_id=%s normalized=%s interaction=%s",
                             result.transport,
                             result.event_type,
                             result.raw_event_id,
                             result.normalized_persisted,
-                            result.command_name,
+                            result.interaction_name,
                         )
                 except (QQOfficialAuthError, QQOfficialGatewayError) as error:
                     if gateway_stop.is_set():
@@ -156,10 +165,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     app_settings.qq_gateway_reconnect_max_delay_seconds,
                 )
 
-        if app_settings.summary_command_enabled:
+        if (
+            app_settings.summary_command_enabled
+            or app_settings.group_assistant_enabled
+        ):
             llm_provider = create_llm_provider(app_settings)
+
+        conversation_query_service = ConversationQueryService(message_repository)
+        if app_settings.summary_command_enabled:
+            assert llm_provider is not None
             summary_service = SummaryService(
-                query_service=ConversationQueryService(message_repository),
+                query_service=conversation_query_service,
                 renderer=MessageRenderer(),
                 provider=llm_provider,
                 max_messages=app_settings.summary_max_messages,
@@ -180,10 +196,42 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 summary_handler=summary_command_handler,
             )
 
+        if app_settings.group_assistant_enabled:
+            assert llm_provider is not None
+            assistant_handler = GroupAssistantHandler(
+                service=GroupAssistantService(
+                    context_builder=GroupAssistantContextBuilder(
+                        query_service=conversation_query_service,
+                        interaction_repository=assistant_interaction_repository,
+                        renderer=MessageRenderer(),
+                        qa_lookback_minutes=app_settings.qa_lookback_minutes,
+                        qa_max_messages=app_settings.qa_max_messages,
+                        chat_lookback_minutes=app_settings.chat_lookback_minutes,
+                        chat_max_messages=app_settings.chat_max_messages,
+                        chat_max_assistant_turns=(
+                            app_settings.chat_max_assistant_turns
+                        ),
+                        max_input_chars=app_settings.assistant_max_input_chars,
+                    ),
+                    provider=llm_provider,
+                    max_output_tokens=app_settings.assistant_max_output_tokens,
+                    max_output_chars=app_settings.assistant_max_output_chars,
+                ),
+                repository=assistant_interaction_repository,
+                sender=group_message_sender,
+                enabled=True,
+                cooldown_seconds=app_settings.assistant_cooldown_seconds,
+            )
+
+        interaction_dispatcher = QQOfficialInteractionDispatcher(
+            command_dispatcher=command_dispatcher,
+            assistant_handler=assistant_handler,
+        )
+
         event_processor = QQOfficialEventProcessor(
             raw_ingestion_service=raw_ingestion_service,
             normalized_ingestion_service=normalized_ingestion_service,
-            command_dispatcher=command_dispatcher,
+            interaction_dispatcher=interaction_dispatcher,
         )
         if app_settings.qq_event_transport == "websocket":
             gateway_client = QQOfficialGatewayClient(
@@ -210,7 +258,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         application.state.qq_event_processor = event_processor
         application.state.qq_event_transport = app_settings.qq_event_transport
         application.state.qq_group_message_sender = group_message_sender
+        application.state.llm_provider = llm_provider
         application.state.qq_command_dispatcher = command_dispatcher
+        application.state.qq_interaction_dispatcher = interaction_dispatcher
+        application.state.group_assistant_handler = assistant_handler
+        application.state.assistant_interaction_repository = (
+            assistant_interaction_repository
+        )
         application.state.ping_command_handler = ping_command_handler
         application.state.raw_event_repository = raw_repository
         application.state.raw_event_ingestion_service = raw_ingestion_service

@@ -162,9 +162,11 @@ class TextSegment(Segment):
 class AtSegment(Segment):
     target: str | None
     is_all: bool
+    display_name: str | None = None
+    is_self: bool | None = None
 ```
 
-当前 QQ Official parser 只有在 payload 的 `mentions[]` 明确确认目标时，才会生成结构化 `AtSegment`。
+当前 QQ Official parser 只有在 payload 的 `mentions[]` 明确确认目标时，才会生成结构化 `AtSegment`。`display_name` 来自明确的 mention nickname/username；`is_self` 只接受 payload 的布尔 `is_you`，缺失时保持 `None`，不根据显示名称猜测 Bot mention。
 
 ### ImageSegment
 
@@ -306,7 +308,7 @@ class UnknownSegment(Segment):
 
 当前 parser 的已证实行为包括：
 
-- 只接受 `gateway.t == "GROUP_MESSAGE_CREATE"` 的 envelope
+- 接受 top-level 或 legacy wrapper 中的 `GROUP_MESSAGE_CREATE` / `GROUP_AT_MESSAGE_CREATE` group envelope
 - `author` 直接来自 payload `author`
 - 文本、mention、图片、文件按当前 sample 和官方文档明确字段解析
 - 不访问网络

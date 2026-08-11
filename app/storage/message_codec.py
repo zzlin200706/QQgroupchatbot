@@ -242,6 +242,8 @@ def _segment_payload(segment: MessageSegment) -> tuple[str, dict[str, Any]]:
         return "at", {
             "target": segment.target,
             "is_all": segment.is_all,
+            "display_name": segment.display_name,
+            "is_self": segment.is_self,
             "raw_data": copy.deepcopy(segment.raw_data),
         }
     if isinstance(segment, ImageSegment):
@@ -345,7 +347,13 @@ class _NodeDecoder:
             if node.node_kind == "text":
                 result: MessageSegment = TextSegment(text=payload.get("text"), **common)
             elif node.node_kind == "at":
-                result = AtSegment(target=payload.get("target"), is_all=payload["is_all"], **common)
+                result = AtSegment(
+                    target=payload.get("target"),
+                    is_all=payload["is_all"],
+                    display_name=payload.get("display_name"),
+                    is_self=payload.get("is_self"),
+                    **common,
+                )
             elif node.node_kind == "image":
                 result = ImageSegment(
                     file=payload.get("file"),

@@ -42,6 +42,17 @@ class Settings(BaseSettings):
     summary_command_lookback_minutes: int = Field(default=120, ge=1)
     summary_command_cooldown_seconds: int = Field(default=60, ge=0)
 
+    group_assistant_enabled: bool = False
+    qa_lookback_minutes: int = Field(default=120, ge=1)
+    qa_max_messages: int = Field(default=150, ge=1)
+    chat_lookback_minutes: int = Field(default=30, ge=1)
+    chat_max_messages: int = Field(default=80, ge=1)
+    chat_max_assistant_turns: int = Field(default=20, ge=1)
+    assistant_max_input_chars: int = Field(default=40000, ge=1)
+    assistant_max_output_tokens: int = Field(default=1200, ge=1)
+    assistant_max_output_chars: int = Field(default=4500, ge=128)
+    assistant_cooldown_seconds: int = Field(default=3, ge=0)
+
     forward_max_depth: int = Field(default=10, ge=1)
     forward_max_nodes: int = Field(default=500, ge=1)
     message_max_segments: int = Field(default=1000, ge=1)

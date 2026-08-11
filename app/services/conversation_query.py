@@ -63,6 +63,37 @@ class ConversationQueryService:
             parser_version=parser_version,
         )
 
+    async def get_messages_before(
+        self,
+        *,
+        platform: str,
+        group_id: str,
+        start_time: datetime,
+        trigger_time: datetime,
+        trigger_raw_event_id: int | None,
+        limit: int = DEFAULT_CONVERSATION_LIMIT,
+    ) -> Sequence[InternalMessage]:
+        """Return a recent window without repeating the current trigger."""
+
+        _require_aware("start_time", start_time)
+        _require_aware("trigger_time", trigger_time)
+        if start_time >= trigger_time:
+            raise ValueError("start_time must be earlier than trigger_time")
+        if limit < 1 or limit > self._max_limit:
+            raise ValueError(f"limit must be between 1 and {self._max_limit}")
+        if not platform:
+            raise ValueError("platform must not be empty")
+        if not group_id:
+            raise ValueError("group_id must not be empty")
+        return await self._repository.list_conversation_before(
+            platform=platform,
+            group_id=group_id,
+            start_time=start_time,
+            trigger_time=trigger_time,
+            trigger_raw_event_id=trigger_raw_event_id,
+            limit=limit,
+        )
+
 
 def _require_aware(name: str, value: datetime) -> None:
     if value.tzinfo is None or value.utcoffset() is None:

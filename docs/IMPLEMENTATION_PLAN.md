@@ -258,7 +258,73 @@ QQ Official WebSocket / Webhook
 - `GROUP_MESSAGE_CREATE` real webhook verification: pending
 - 若真实 webhook 只收到 `GROUP_AT_MESSAGE_CREATE`，则保留 WebSocket 为当前正式 transport，不伪造“全量普通群消息能力”
 
-## Next Phase — Provider Configuration / Selection
+## Phase N — Complete Group Assistant Text Interaction Layer
+
+### 目标与架构
+
+在 Phase M transport-neutral inbound pipeline 上增加完整文本交互层：
+
+```text
+QQOfficialEventProcessor
+→ raw_events
+→ QQOfficialMessageParser
+→ InternalMessage / MessageRepository
+→ QQOfficialInteractionDispatcher
+├── #ping / #总结
+└── GroupAssistantHandler
+    ├── #问 → grounded current-group QA
+    └── structured @bot → contextual chat
+        → GroupAssistantContextBuilder
+        → shared LLMProvider
+        → QQ passive reply
+        → assistant_interactions
+```
+
+### 已实现行为
+
+- `#问 <问题>`：120 分钟、最多 150 条当前群 inbound message；不使用 Bot 历史回答作为事实
+- bare `#问`：只回复用法，不调用 LLM
+- `@bot`：支持 `GROUP_AT_MESSAGE_CREATE`，以及真实 sample 中 token 对应 `mentions[].is_you=true` 的 `GROUP_MESSAGE_CREATE`
+- chat：30 分钟、最多 80 条群消息和 20 个成功 assistant turns，按 timestamp 合并
+- `assistant_interactions`：只在 LLM 成功且 QQ send 成功后写入，不伪造 `raw_events/messages`
+- `assistant_trigger_claims`：同一 logical trigger 只处理一次
+- cooldown：按 platform + group + requester 隔离
+- provider：summary 与 assistant 共享同一个 configured `LLMProvider` 实例
+- prompts：grounded/chat 分离；conversation data 做 XML escaping，并明确标为不可信数据
+- text-only output：`json_output=false`；空内容和 `finish_reason=length` 拒绝；内部字符上限 4500
+
+### Reply context 结论
+
+当前真实 reply sample 的 `message_type=103` 只提供 opaque `ref_msg_idx/msg_idx` 和可选引用展示内容。它不提供可与 QQ send response `id` 可靠关联的 target message ID。腾讯 reference implementation 也依赖额外 RefIndex 本地映射层。
+
+因此本 Phase 不猜测“上一条 Bot 消息”，不把 `REFIDX` 当 message ID，reply-to-bot 自动触发保持 unavailable。reply event 继续 raw-first 入库；只有同时存在可靠 `@bot` 证据时才按 mention chat 处理。
+
+### 配置
+
+```dotenv
+GROUP_ASSISTANT_ENABLED=true
+QA_LOOKBACK_MINUTES=120
+QA_MAX_MESSAGES=150
+CHAT_LOOKBACK_MINUTES=30
+CHAT_MAX_MESSAGES=80
+CHAT_MAX_ASSISTANT_TURNS=20
+ASSISTANT_MAX_INPUT_CHARS=40000
+ASSISTANT_MAX_OUTPUT_TOKENS=1200
+ASSISTANT_MAX_OUTPUT_CHARS=4500
+ASSISTANT_COOLDOWN_SECONDS=3
+```
+
+代码默认 `GROUP_ASSISTANT_ENABLED=false`，避免未配置 LLM 凭证的环境启动失败；`.env.example` 给出显式启用配置。
+
+### 当前状态
+
+- implementation validated
+- automated unit/integration tests: `299 passed`
+- real QQ assistant smoke pending
+- default inbound transport remains `websocket`
+- Phase M webhook automated support remains validated; real webhook smoke remains pending
+
+## Completed — Provider Configuration / Selection
 
 在 provider 扩展后，加入最小可用的 provider 选择配置：
 
@@ -316,27 +382,27 @@ MultimodalPolicy
 
 当前不要把图片理解混进 `SummaryService`。
 
-## Next Phase — Mention / Reply Chat
+## Completed in Phase N — Mention Chat
 
-后续聊天回复方向固定为：
+当前聊天回复方向已经落地为：
 
 ```text
 QQ Official incoming message
         ↓
-TriggerPolicy
+QQOfficialInteractionDispatcher
         ↓
-ConversationContextService
+GroupAssistantContextBuilder
         ↓
 MessageRenderer
         ↓
-ChatReplyService
+GroupAssistantService
         ↓
 LLMProvider
         ↓
 QQ Official passive reply
 ```
 
-`ChatReplyService` 不负责：
+`GroupAssistantService` 不负责：
 
 - QQ HTTP
 - token 获取
@@ -350,14 +416,16 @@ QQ outbound service 不负责：
 - summary
 - AI reasoning
 
+reply-to-bot 仍取决于未来能否获得或建立可靠 `REFIDX → Bot outbound message_id` 映射；当前不猜测。
+
 ## Later — Context Expansion
 
 未来群聊上下文不应等同于“每次直接把最近 100 条消息全部塞给模型”。
 
-需要引入：
+需要在当前 builder 之上扩展：
 
 ```text
-ConversationContextService
+GroupAssistantContextBuilder / future retrieval service
 ```
 
 职责：
@@ -376,7 +444,7 @@ context insufficient
         ↓
 ContextExpansionRequest
         ↓
-ConversationContextService 查询更多历史
+context service 查询更多历史
         ↓
 second pass
 ```
@@ -406,16 +474,16 @@ PendingInteraction
 
 隔离，避免把 A 的意图关联到 B 的图片。
 
-## Later — QA
+## Later — Retrieval / RAG
 
-第一版检索 / QA 路线应保持轻量：
+未来超出时间窗口的检索 / RAG 路线应保持轻量：
 
 ```text
 SQLite time-range query
 ↓
 SQLite keyword search / FTS5
 ↓
-ConversationContextService
+retrieval-aware context service
 ↓
 LLM QA
 ```

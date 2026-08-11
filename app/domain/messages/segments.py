@@ -27,6 +27,8 @@ class TextSegment(Segment):
 class AtSegment(Segment):
     target: str | None
     is_all: bool
+    display_name: str | None = None
+    is_self: bool | None = None
 
 
 @dataclass(frozen=True)
