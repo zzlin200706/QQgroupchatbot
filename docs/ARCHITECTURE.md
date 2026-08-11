@@ -9,7 +9,7 @@
 active design 只围绕：
 
 ```text
-QQ Official Gateway / OpenAPI
+QQ Official inbound transport / OpenAPI
 + Python
 + SQLite
 + local filesystem
@@ -23,11 +23,11 @@ QQ Official Gateway / OpenAPI
 当前代码已经落地并由测试覆盖的核心数据流是：
 
 ```text
-QQ Official Gateway
+QQ Official WebSocket / Webhook
         ↓
-QQOfficialGatewayClient
+QQOfficialInboundEvent
         ↓
-QQGatewayDispatch
+QQOfficialEventProcessor
         ↓
 QQOfficialRawEventIngestionService
         ↓
@@ -63,9 +63,11 @@ QQ Official passive reply
 其中：
 
 - `raw_events`、`messages`、`message_nodes`、`summaries` 都在同一个 SQLite 中
-- `FastAPI` 当前只提供 `/health` 和应用生命周期托管
+- `FastAPI` 当前提供 `/health`、应用生命周期托管和 QQ Official webhook endpoint
 - `SUMMARY_COMMAND_ENABLED=false` 时，不启动 summary handler，但 raw/normalized persistence 仍正常工作
 - 当前 summary reply 只走由入站消息触发的被动回复链路，不把“只有 `group_id` 的主动群发”当作当前 phase 范围
+- 当前 inbound transport 由 `QQ_EVENT_TRANSPORT` 选择，默认仍为 `websocket`
+- webhook 架构已经通过自动化验证，真实 QQ webhook smoke 仍 pending
 
 ## 当前已落地组件
 
@@ -73,8 +75,10 @@ QQ Official passive reply
 
 - `auth.py`：AccessToken 获取
 - `gateway.py`：`/gateway/bot`、HELLO / IDENTIFY / HEARTBEAT、dispatch、reconnect state
+- `inbound.py`：transport-neutral inbound event model
 - `message_api.py`：群消息发送
 - `redaction.py`：本地 sample 与日志安全脱敏
+- `webhook.py`：callback validation、Ed25519 签名校验、webhook event adaptation
 
 ### `app/parsers/`
 
@@ -95,6 +99,7 @@ QQ Official passive reply
 
 - `QQOfficialRawEventIngestionService`
 - `QQOfficialNormalizedMessageIngestionService`
+- `QQOfficialEventProcessor`
 - `ConversationQueryService`
 - `SummaryService`
 - `SummaryCommandHandler`
@@ -118,20 +123,34 @@ QQ Official passive reply
 - 不做 parser。
 - 不做数据库业务。
 - 不做 summary 或 LLM 调用。
+- 当前仍保留并继续支持，未因 webhook phase 删除。
+
+### Webhook Adapter
+
+- 负责 callback validation（`op=13`）
+- 负责 Ed25519 签名校验
+- 负责把 HTTP body + headers 适配成 `QQOfficialInboundEvent`
+- 不访问数据库
+- 不调用 parser / summary / LLM / sender
+
+### Event Processor
+
+- 负责 `QQOfficialInboundEvent → raw → normalized → command dispatch`
+- WebSocket 与 Webhook 共用同一条业务链
+- command 仍以后台 task 形式执行，不让 transport 层直接触发 LLM 细节
 
 ### Raw Event Ingestion
 
-- 负责把 `QQGatewayDispatch` 写入 `raw_events`。
-- 存储的 envelope 统一为：
+- 负责把 transport-neutral inbound event 写入 `raw_events`。
+- `raw_payload` 当前统一保留 QQ 官方 top-level envelope：
 
 ```json
 {
-  "gateway": {
-    "op": 0,
-    "s": 123,
-    "t": "GROUP_MESSAGE_CREATE"
-  },
-  "data": {
+  "id": "event_id",
+  "op": 0,
+  "s": 123,
+  "t": "GROUP_MESSAGE_CREATE",
+  "d": {
     "...": "..."
   }
 }
@@ -238,11 +257,11 @@ prompt = str(raw_gateway_payload)
 在保持单机轻量部署前提下，后续 phase 的目标架构统一按下面的概念边界扩展：
 
 ```text
-QQ Official Gateway
+QQ Official WebSocket / Webhook
         ↓
-QQOfficialGatewayClient
+QQOfficialInboundEvent
         ↓
-QQGatewayDispatch
+QQOfficialEventProcessor
         ↓
 QQOfficialRawEventIngestionService
         ↓

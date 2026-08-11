@@ -221,6 +221,43 @@ QQ Official Gateway
 - 尚未做真实群 `#ping`
 - 尚未做真实群 `#总结`
 
+## Current Phase — QQ Official Webhook-ready Inbound Architecture
+
+### 目标
+
+在保持当前已真实工作的 QQ Official Gateway WebSocket 链路可用前提下，引入 transport-neutral inbound processing，并新增符合腾讯当前公开文档的 webhook transport：
+
+```text
+QQ Official WebSocket / Webhook
+→ QQOfficialInboundEvent
+→ QQOfficialEventProcessor
+→ raw_events
+→ QQOfficialMessageParser
+→ InternalMessage
+→ MessageRepository
+→ QQOfficialCommandDispatcher
+```
+
+### 当前实现边界
+
+- `QQ_EVENT_TRANSPORT=websocket|webhook`
+- 默认仍为 `websocket`
+- `gateway.py` 保留
+- 新增 webhook callback validation（`op=13`）
+- 新增 Ed25519 签名校验
+- `main.py` 只做 transport wiring
+- raw-first 保持不变
+- command / summary / provider 边界不变
+
+### 当前状态
+
+- implementation validated
+- automated tests passed
+- real QQ webhook smoke pending
+- `GROUP_MESSAGE_CREATE` automated code support: yes
+- `GROUP_MESSAGE_CREATE` real webhook verification: pending
+- 若真实 webhook 只收到 `GROUP_AT_MESSAGE_CREATE`，则保留 WebSocket 为当前正式 transport，不伪造“全量普通群消息能力”
+
 ## Next Phase — Provider Configuration / Selection
 
 在 provider 扩展后，加入最小可用的 provider 选择配置：

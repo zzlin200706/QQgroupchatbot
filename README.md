@@ -26,15 +26,18 @@
 - `MessageRepository` / `ConversationQueryService` / `MessageRenderer`
 - `SummaryService` / `SummaryRepository` / `SummaryMessageFormatter`
 - `DeepSeekProvider`
+- `OpenAICompatibleProvider`
 - QQ Official group passive reply sender
+- `#ping` / `#总结` command dispatch
+- inbound transport selector: `QQ_EVENT_TRANSPORT=websocket|webhook` (default `websocket`)
 - FastAPI `/health` 和应用生命周期管理
 
 ## 当前运行链路
 
 ```text
-QQ Official Gateway
-→ QQOfficialGatewayClient
-→ QQGatewayDispatch
+QQ Official WebSocket / Webhook
+→ QQOfficialInboundEvent
+→ QQOfficialEventProcessor
 → QQOfficialRawEventIngestionService
 → raw_events
 → QQOfficialMessageParser
@@ -55,13 +58,15 @@ QQ Official Gateway
 当 `SUMMARY_COMMAND_ENABLED=false` 时，当前 runtime 仍会继续做：
 
 ```text
-Gateway
+inbound transport
 → raw_events
 → parser
 → normalized messages
 ```
 
 只是不会启动 `#总结` 的 LLM 闭环。
+
+当前默认 transport 仍是已真实 smoke 过的 `websocket`。Webhook 入站架构已完成代码与自动化验证，但真实 QQ webhook smoke 仍 pending。
 
 ## 当前约束
 

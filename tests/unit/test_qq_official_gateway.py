@@ -57,12 +57,21 @@ def test_dispatch_updates_sequence_ready_ack_and_redacts_logs(caplog: pytest.Log
     client = QQOfficialGatewayClient(auth_client=FakeAuthClient())
     with caplog.at_level(logging.INFO):
         ready = client.handle_payload({"op": 0, "s": 12, "t": "READY", "d": {"session_id": "s", "user": {"id": "b"}}})
-        event = client.handle_payload({"op": 0, "s": 13, "t": "GROUP_AT_MESSAGE_CREATE", "d": {"content": "private", "message_scene": {"ext": "secret"}}})
+        event = client.handle_payload({"id": "event-13", "op": 0, "s": 13, "t": "GROUP_AT_MESSAGE_CREATE", "d": {"content": "private", "message_scene": {"ext": "secret"}}})
         assert client.handle_payload({"op": 11}) is None
     assert ready is not None and event is not None
     assert client.latest_sequence == 13
     assert client.ready is not None and client.ready.session_id == "s"
     assert client.last_heartbeat_ack is True
+    assert event.event_id == "event-13"
+    assert event.op == 0
+    assert event.raw_payload == {
+        "id": "event-13",
+        "op": 0,
+        "s": 13,
+        "t": "GROUP_AT_MESSAGE_CREATE",
+        "d": {"content": "private", "message_scene": {"ext": "secret"}},
+    }
     assert "GROUP_AT_MESSAGE_CREATE" in caplog.text
     assert "private" not in caplog.text
     assert "secret" not in caplog.text

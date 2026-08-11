@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import inspect
 import json
 import logging
@@ -70,6 +71,9 @@ class QQGatewayDispatch:
     sequence: int | None
     event_type: str | None
     data: object
+    event_id: str | None = None
+    op: int = 0
+    raw_payload: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -232,6 +236,9 @@ class QQOfficialGatewayClient:
             sequence=sequence,
             event_type=event_type if isinstance(event_type, str) else None,
             data=payload.get("d"),
+            event_id=_string(payload.get("id")),
+            op=0,
+            raw_payload=copy.deepcopy(dict(payload)),
         )
         if dispatch.event_type == "READY":
             self._ready = _ready(dispatch.data)
@@ -331,6 +338,10 @@ class QQOfficialGatewayClient:
 
 def _integer(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _string(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
 
 
 def _session_limit(value: object) -> QQSessionStartLimit | None:

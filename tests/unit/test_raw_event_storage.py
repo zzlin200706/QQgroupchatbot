@@ -14,6 +14,7 @@ from app.storage.raw_event_repository import RawEventRepository
 def dispatch(
     *,
     event_type: str = "GROUP_MESSAGE_CREATE",
+    event_id: str = "event-1",
     sequence: int = 2,
     content: str = "hello",
 ) -> QQGatewayDispatch:
@@ -34,6 +35,7 @@ def dispatch(
             "content": content,
             "future": {"kept": True},
         },
+        event_id=event_id,
     )
 
 
@@ -64,12 +66,30 @@ async def test_dispatch_round_trips_with_parser_envelope_and_safe_indexes(
         assert loaded.message_id == "message-1"
         assert loaded.event_time is not None
         assert loaded.raw_payload == {
-            "gateway": {"op": 0, "s": 2, "t": "GROUP_MESSAGE_CREATE"},
-            "data": event.data,
+            "id": "event-1",
+            "op": 0,
+            "s": 2,
+            "t": "GROUP_MESSAGE_CREATE",
+            "d": event.data,
         }
         assert loaded.payload_hash == QQOfficialRawEventIngestionService.payload_hash(
             loaded.raw_payload
         )
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_event_id_is_preserved_in_authoritative_raw_payload(tmp_path: Path) -> None:
+    database, repository = await create_storage(tmp_path)
+    service = QQOfficialRawEventIngestionService(repository)
+    event = dispatch(event_id="qq-event-123")
+    try:
+        stored = await service.ingest(event)
+        assert stored is not None
+        loaded = await repository.get_by_id(stored.id)
+        assert loaded is not None
+        assert loaded.raw_payload["id"] == "qq-event-123"
     finally:
         await database.dispose()
 
@@ -120,7 +140,7 @@ async def test_unknown_dispatch_fields_are_preserved_without_interpretation(
         assert stored is not None
         loaded = await repository.get_by_id(stored.id)
         assert loaded is not None
-        assert loaded.raw_payload["data"]["future"] == {"kept": True}
+        assert loaded.raw_payload["d"]["future"] == {"kept": True}
     finally:
         await database.dispose()
 

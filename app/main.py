@@ -8,7 +8,8 @@ from typing import Literal
 
 import httpx
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.adapters.qq_official import (
@@ -17,6 +18,10 @@ from app.adapters.qq_official import (
     QQOfficialGatewayClient,
     QQOfficialGatewayError,
     QQOfficialGroupMessageSender,
+    QQOfficialWebhookAdapter,
+    QQOfficialWebhookPayloadError,
+    QQOfficialWebhookSignatureError,
+    inbound_event_from_gateway_dispatch,
 )
 from app.config import Settings, get_settings
 from app.llm.providers import create_llm_provider
@@ -28,6 +33,7 @@ from app.services.normalized_message_ingestion import (
     QQOfficialNormalizedMessageIngestionService,
 )
 from app.services.ping_command import PingCommandHandler
+from app.services.qq_official_event_processor import QQOfficialEventProcessor
 from app.services.raw_event_ingestion import QQOfficialRawEventIngestionService
 from app.services.summary import SummaryService
 from app.services.summary_command import SummaryCommandHandler
@@ -72,11 +78,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             timeout_seconds=app_settings.qq_api_timeout_seconds,
             client=qq_http_client,
         )
-        gateway_client = QQOfficialGatewayClient(
-            auth_client=auth_client,
-            timeout_seconds=app_settings.qq_api_timeout_seconds,
-            http_client=qq_http_client,
-        )
         group_message_sender = QQOfficialGroupMessageSender(
             auth_client=auth_client,
             timeout_seconds=app_settings.qq_api_timeout_seconds,
@@ -88,22 +89,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ping_handler=ping_command_handler
         )
         llm_provider = None
-        command_tasks: set[asyncio.Task[object]] = set()
         gateway_stop = asyncio.Event()
-
-        def command_task_finished(task: asyncio.Task[object]) -> None:
-            command_tasks.discard(task)
-            if task.cancelled():
-                return
-            error = task.exception()
-            if error is not None:
-                logger.error(
-                    "qq official command task failed task_name=%s error_type=%s",
-                    task.get_name(),
-                    type(error).__name__,
-                )
+        gateway_client: QQOfficialGatewayClient | None = None
+        gateway_task: asyncio.Task[None] | None = None
+        webhook_adapter: QQOfficialWebhookAdapter | None = None
 
         async def handle_dispatch_loop() -> None:
+            assert gateway_client is not None
             retry_delay = app_settings.qq_gateway_reconnect_initial_delay_seconds
             while not gateway_stop.is_set():
                 try:
@@ -112,33 +104,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     retry_delay = app_settings.qq_gateway_reconnect_initial_delay_seconds
                     while not gateway_stop.is_set():
                         dispatch = await gateway_client.next_event()
-                        persisted = await raw_ingestion_service.ingest(dispatch)
-                        if persisted is None:
-                            continue
-                        logger.info(
-                            "raw event persisted id=%s event_type=%s payload_hash=%s",
-                            persisted.id,
-                            persisted.sub_type,
-                            persisted.payload_hash,
+                        result = await event_processor.process(
+                            inbound_event_from_gateway_dispatch(dispatch)
                         )
-                        normalized = await normalized_ingestion_service.ingest(
-                            persisted
-                        )
-                        if normalized is None:
-                            continue
-                        logger.info(
-                            "normalized message persisted raw_event_id=%s platform=%s",
-                            persisted.id,
-                            normalized.platform,
-                        )
-                        command_name = command_dispatcher.command_name(normalized)
-                        if command_name is not None:
-                            task = asyncio.create_task(
-                                command_dispatcher.handle(normalized),
-                                name=f"qq-official-{command_name}-command",
+                        if not result.raw_persisted:
+                            logger.error(
+                                "qq official inbound event processing failed transport=%s event_type=%s stage=raw_persistence",
+                                result.transport,
+                                result.event_type,
                             )
-                            command_tasks.add(task)
-                            task.add_done_callback(command_task_finished)
+                            continue
+                        logger.info(
+                            "qq official inbound event processed transport=%s event_type=%s raw_event_id=%s normalized=%s command=%s",
+                            result.transport,
+                            result.event_type,
+                            result.raw_event_id,
+                            result.normalized_persisted,
+                            result.command_name,
+                        )
                 except (QQOfficialAuthError, QQOfficialGatewayError) as error:
                     if gateway_stop.is_set():
                         break
@@ -197,16 +180,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 summary_handler=summary_command_handler,
             )
 
-        gateway_task = asyncio.create_task(
-            handle_dispatch_loop(),
-            name="qq-official-gateway-loop",
+        event_processor = QQOfficialEventProcessor(
+            raw_ingestion_service=raw_ingestion_service,
+            normalized_ingestion_service=normalized_ingestion_service,
+            command_dispatcher=command_dispatcher,
         )
+        if app_settings.qq_event_transport == "websocket":
+            gateway_client = QQOfficialGatewayClient(
+                auth_client=auth_client,
+                timeout_seconds=app_settings.qq_api_timeout_seconds,
+                http_client=qq_http_client,
+            )
+            gateway_task = asyncio.create_task(
+                handle_dispatch_loop(),
+                name="qq-official-gateway-loop",
+            )
+        else:
+            webhook_adapter = QQOfficialWebhookAdapter(
+                bot_secret=app_settings.qq_bot_app_secret,
+                app_id=app_settings.qq_bot_app_id,
+            )
 
         application.state.database = database
         application.state.qq_http_client = qq_http_client
         application.state.qq_auth_client = auth_client
         application.state.qq_gateway_client = gateway_client
         application.state.qq_gateway_task = gateway_task
+        application.state.qq_webhook_adapter = webhook_adapter
+        application.state.qq_event_processor = event_processor
+        application.state.qq_event_transport = app_settings.qq_event_transport
         application.state.qq_group_message_sender = group_message_sender
         application.state.qq_command_dispatcher = command_dispatcher
         application.state.ping_command_handler = ping_command_handler
@@ -220,13 +222,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             yield
         finally:
             gateway_stop.set()
-            gateway_task.cancel()
-            await asyncio.gather(gateway_task, return_exceptions=True)
-            for task in tuple(command_tasks):
-                task.cancel()
-            if command_tasks:
-                await asyncio.gather(*command_tasks, return_exceptions=True)
-            await gateway_client.close()
+            if gateway_task is not None:
+                gateway_task.cancel()
+                await asyncio.gather(gateway_task, return_exceptions=True)
+            if gateway_client is not None:
+                await gateway_client.close()
+            await event_processor.aclose()
             if llm_provider is not None:
                 await llm_provider.aclose()
             await qq_http_client.aclose()
@@ -245,6 +246,47 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             app="qqgroupchatbot",
             environment=app_settings.app_env,
         )
+
+    @application.post("/qq-official/webhook")
+    async def qq_official_webhook(request: Request) -> Response:
+        if app_settings.qq_event_transport != "webhook":
+            raise HTTPException(status_code=404, detail="webhook transport disabled")
+
+        adapter = application.state.qq_webhook_adapter
+        processor = application.state.qq_event_processor
+        body = await request.body()
+        try:
+            parsed = adapter.parse_request(headers=request.headers, body=body)
+        except QQOfficialWebhookSignatureError as error:
+            logger.warning(
+                "qq official webhook rejected error_type=%s",
+                type(error).__name__,
+            )
+            raise HTTPException(status_code=401, detail="invalid webhook signature") from error
+        except QQOfficialWebhookPayloadError as error:
+            logger.warning(
+                "qq official webhook payload invalid error_type=%s",
+                type(error).__name__,
+            )
+            raise HTTPException(status_code=400, detail="invalid webhook payload") from error
+
+        if parsed.validation_response is not None:
+            return JSONResponse(
+                {
+                    "plain_token": parsed.validation_response.plain_token,
+                    "signature": parsed.validation_response.signature,
+                }
+            )
+
+        assert parsed.event is not None
+        result = await processor.process(parsed.event)
+        if not result.raw_persisted:
+            logger.error(
+                "qq official webhook processing failed event_type=%s stage=raw_persistence",
+                result.event_type,
+            )
+            raise HTTPException(status_code=500, detail="webhook event persistence failed")
+        return JSONResponse(adapter.ack_payload())
 
     return application
 

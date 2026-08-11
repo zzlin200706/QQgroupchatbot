@@ -21,6 +21,12 @@ from app.adapters.qq_official.gateway import (
     QQOfficialGatewayResponseError,
     QQOfficialGatewayTransportError,
 )
+from app.adapters.qq_official.inbound import (
+    QQOfficialInboundEvent,
+    QQOfficialInboundTransport,
+    inbound_event_from_gateway_dispatch,
+    inbound_event_from_webhook_payload,
+)
 from app.adapters.qq_official.message_api import (
     QQOfficialMessageAPIAuthenticationError,
     QQOfficialGroupMessageSendResult,
@@ -35,6 +41,16 @@ from app.adapters.qq_official.message_api import (
     QQOfficialMessageAPIServerError,
     QQOfficialMessageAPITimeoutError,
     QQOfficialMessageAPITransportError,
+)
+from app.adapters.qq_official.webhook import (
+    QQ_OFFICIAL_WEBHOOK_ACK_OPCODE,
+    QQOfficialWebhookAdapter,
+    QQOfficialWebhookConfigurationError,
+    QQOfficialWebhookError,
+    QQOfficialWebhookParseResult,
+    QQOfficialWebhookPayloadError,
+    QQOfficialWebhookSignatureError,
+    QQOfficialWebhookValidationResponse,
 )
 
 __all__ = [
@@ -55,6 +71,10 @@ __all__ = [
     "QQOfficialGatewayProtocolError",
     "QQOfficialGatewayResponseError",
     "QQOfficialGatewayTransportError",
+    "QQOfficialInboundEvent",
+    "QQOfficialInboundTransport",
+    "inbound_event_from_gateway_dispatch",
+    "inbound_event_from_webhook_payload",
     "QQOfficialGroupMessageSendResult",
     "QQOfficialGroupMessageSender",
     "QQOfficialMessageAPIAuthenticationError",
@@ -68,4 +88,12 @@ __all__ = [
     "QQOfficialMessageAPIServerError",
     "QQOfficialMessageAPITimeoutError",
     "QQOfficialMessageAPITransportError",
+    "QQ_OFFICIAL_WEBHOOK_ACK_OPCODE",
+    "QQOfficialWebhookAdapter",
+    "QQOfficialWebhookConfigurationError",
+    "QQOfficialWebhookError",
+    "QQOfficialWebhookParseResult",
+    "QQOfficialWebhookPayloadError",
+    "QQOfficialWebhookSignatureError",
+    "QQOfficialWebhookValidationResponse",
 ]

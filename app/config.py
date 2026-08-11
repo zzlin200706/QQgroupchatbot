@@ -1,6 +1,7 @@
 """Application configuration loaded from environment variables."""
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -16,6 +17,7 @@ class Settings(BaseSettings):
 
     qq_bot_app_id: str = ""
     qq_bot_app_secret: str = ""
+    qq_event_transport: Literal["websocket", "webhook"] = "websocket"
     qq_api_timeout_seconds: float = Field(default=10.0, gt=0)
     qq_gateway_reconnect_initial_delay_seconds: float = Field(default=1.0, gt=0)
     qq_gateway_reconnect_max_delay_seconds: float = Field(default=30.0, gt=0)

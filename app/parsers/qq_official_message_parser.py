@@ -1,11 +1,11 @@
-"""Parse captured QQ Official Gateway group-message dispatches losslessly.
+"""Parse captured QQ Official group-message dispatches losslessly.
 
-The Phase D samples establish the currently supported shape: a Gateway dispatch
-envelope with ``gateway.t == "GROUP_MESSAGE_CREATE"`` and its message payload in
-``data``.  In particular, the captured ``message_type == 102`` messages contain
-only QQ-rendered text, not structured forward nodes.  The parser deliberately
-keeps those as unresolved :class:`ForwardSegment` values instead of extracting
-authors, media, or nesting from the rendered text.
+The Phase D samples establish the currently supported shape: QQ Official event
+envelopes whose top-level ``t`` is a group message event and whose message
+payload lives in ``d``. In particular, the captured ``message_type == 102``
+messages contain only QQ-rendered text, not structured forward nodes. The
+parser deliberately keeps those as unresolved :class:`ForwardSegment` values
+instead of extracting authors, media, or nesting from the rendered text.
 """
 
 from __future__ import annotations
@@ -39,18 +39,19 @@ from app.domain.messages.segments import (
 )
 
 
-_GROUP_MESSAGE_CREATE = "GROUP_MESSAGE_CREATE"
+_GROUP_MESSAGE_EVENTS = frozenset({"GROUP_MESSAGE_CREATE", "GROUP_AT_MESSAGE_CREATE"})
 _REPLY_MESSAGE_TYPE = 103
 _FORWARD_MESSAGE_TYPE = 102
 _MENTION_TOKEN = re.compile(r"<@([^>]+)>")
 
 
 class QQOfficialMessageParser:
-    """Transform one QQ Official Gateway group-message dispatch into a message.
+    """Transform one QQ Official group-message event into a message.
 
     This parser performs no network requests and does not infer data absent from
-    a dispatch.  It accepts only the captured Gateway envelope; unrelated
-    dispatches return ``None``.
+    an event payload. It accepts both the current top-level QQ envelope and the
+    repository's earlier ``gateway/data`` wrapper for backward compatibility.
+    Unrelated events return ``None``.
     """
 
     def parse(
@@ -59,9 +60,8 @@ class QQOfficialMessageParser:
         *,
         raw_event_id: int | None = None,
     ) -> InternalMessage | None:
-        gateway = event.get("gateway")
-        payload = event.get("data")
-        if not isinstance(gateway, Mapping) or gateway.get("t") != _GROUP_MESSAGE_CREATE:
+        event_type, payload = _event_payload(event)
+        if event_type not in _GROUP_MESSAGE_EVENTS:
             return None
         if not isinstance(payload, Mapping):
             return None
@@ -80,7 +80,7 @@ class QQOfficialMessageParser:
             platform_message_id=_as_string(raw_payload.get("id")),
             context=MessageContext(
                 message_type=message_type,
-                sub_type=_as_string(gateway.get("t")),
+                sub_type=event_type,
                 group_id=_group_identifier(raw_payload),
             ),
             actor=actor,
@@ -304,6 +304,16 @@ class QQOfficialMessageParser:
                     )
                 )
         return segments
+
+
+def _event_payload(event: Mapping[str, Any]) -> tuple[str | None, object]:
+    if "t" in event or "d" in event:
+        return _as_string(event.get("t")), event.get("d")
+    gateway = event.get("gateway")
+    payload = event.get("data")
+    if not isinstance(gateway, Mapping):
+        return None, payload
+    return _as_string(gateway.get("t")), payload
 
 
 def _identity(

@@ -8,6 +8,10 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from app.adapters.qq_official.inbound import (
+    QQOfficialInboundEvent,
+    inbound_event_from_gateway_dispatch,
+)
 from app.adapters.qq_official.gateway import QQGatewayDispatch
 from app.storage.models import RawEvent
 from app.storage.raw_event_repository import RawEventRepository
@@ -17,22 +21,23 @@ logger = logging.getLogger(__name__)
 
 
 class QQOfficialRawEventIngestionService:
-    """Persist one QQ Official dispatch in the parser's stored envelope shape."""
+    """Persist one QQ Official inbound event before semantic parsing."""
 
     def __init__(self, repository: RawEventRepository) -> None:
         self._repository = repository
 
-    async def ingest(self, dispatch: QQGatewayDispatch) -> RawEvent | None:
+    async def ingest(
+        self,
+        event: QQOfficialInboundEvent | QQGatewayDispatch,
+    ) -> RawEvent | None:
         """Persist one receipt, logging a safe summary if storage fails."""
 
-        payload = {
-            "gateway": {
-                "op": 0,
-                "s": dispatch.sequence,
-                "t": dispatch.event_type,
-            },
-            "data": dispatch.data,
-        }
+        inbound_event = (
+            event
+            if isinstance(event, QQOfficialInboundEvent)
+            else inbound_event_from_gateway_dispatch(event)
+        )
+        payload = inbound_event.raw_payload
         metadata = _dispatch_metadata(payload)
         payload_hash = self.payload_hash(payload)
         try:
@@ -74,9 +79,18 @@ class QQOfficialRawEventIngestionService:
 
 
 def _dispatch_metadata(payload: dict[str, Any]) -> dict[str, Any]:
-    gateway = payload.get("gateway")
-    data = payload.get("data")
-    if not isinstance(gateway, dict) or not isinstance(data, dict):
+    event_type: str | None = None
+    data: dict[str, Any] | None = None
+    if isinstance(payload.get("d"), dict):
+        event_type = _string_index(payload.get("t"))
+        data = payload.get("d")
+    elif isinstance(payload.get("gateway"), dict) and isinstance(payload.get("data"), dict):
+        gateway = payload.get("gateway")
+        assert isinstance(gateway, dict)
+        event_type = _string_index(gateway.get("t"))
+        data = payload.get("data")
+
+    if data is None:
         return {
             "event_time": None,
             "event_type": None,
@@ -94,7 +108,7 @@ def _dispatch_metadata(payload: dict[str, Any]) -> dict[str, Any]:
         )
     return {
         "event_time": _event_time(data.get("timestamp")),
-        "event_type": _string_index(gateway.get("t")),
+        "event_type": event_type,
         "message_type": _string_index(data.get("message_type")),
         "user_id": user_identifier,
         "group_id": _string_index(data.get("group_openid"))

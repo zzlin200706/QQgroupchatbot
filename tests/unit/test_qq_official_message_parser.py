@@ -255,3 +255,38 @@ def test_non_group_message_dispatch_is_not_parsed() -> None:
     event = sample("001_text.json")
     event["gateway"]["t"] = "AT_MESSAGE_CREATE"
     assert QQOfficialMessageParser().parse(event) is None
+
+
+def test_top_level_group_envelope_is_parsed_without_gateway_wrapper() -> None:
+    wrapped = sample("001_text.json")
+    event = {
+        "id": "event-1",
+        "op": 0,
+        "s": 7,
+        "t": "GROUP_MESSAGE_CREATE",
+        "d": copy.deepcopy(wrapped["data"]),
+    }
+
+    message = QQOfficialMessageParser().parse(event, raw_event_id=42)
+
+    assert message is not None
+    assert message.platform_message_id == wrapped["data"]["id"]
+    assert message.context.sub_type == "GROUP_MESSAGE_CREATE"
+    assert message.context.group_id == wrapped["data"]["group_openid"]
+
+
+def test_group_at_message_create_reuses_same_parser_without_guessing_context() -> None:
+    wrapped = sample("001_text.json")
+    event = {
+        "id": "event-2",
+        "op": 0,
+        "s": 8,
+        "t": "GROUP_AT_MESSAGE_CREATE",
+        "d": copy.deepcopy(wrapped["data"]),
+    }
+
+    message = QQOfficialMessageParser().parse(event, raw_event_id=42)
+
+    assert message is not None
+    assert message.context.sub_type == "GROUP_AT_MESSAGE_CREATE"
+    assert message.author.user_id == wrapped["data"]["author"]["id"]
