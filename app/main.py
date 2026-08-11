@@ -22,13 +22,15 @@ from app.config import Settings, get_settings
 from app.llm.providers import create_llm_provider
 from app.parsers.qq_official_message_parser import QQOfficialMessageParser
 from app.rendering import MessageRenderer, SummaryMessageFormatter
+from app.services.command_dispatch import QQOfficialCommandDispatcher
 from app.services.conversation_query import ConversationQueryService
 from app.services.normalized_message_ingestion import (
     QQOfficialNormalizedMessageIngestionService,
 )
+from app.services.ping_command import PingCommandHandler
 from app.services.raw_event_ingestion import QQOfficialRawEventIngestionService
 from app.services.summary import SummaryService
-from app.services.summary_command import SummaryCommandHandler, is_summary_command
+from app.services.summary_command import SummaryCommandHandler
 from app.storage.database import Database
 from app.storage.message_repository import MessageRepository
 from app.storage.raw_event_repository import RawEventRepository
@@ -80,7 +82,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             timeout_seconds=app_settings.qq_api_timeout_seconds,
             http_client=qq_http_client,
         )
+        ping_command_handler = PingCommandHandler(sender=group_message_sender)
         summary_command_handler: SummaryCommandHandler | None = None
+        command_dispatcher = QQOfficialCommandDispatcher(
+            ping_handler=ping_command_handler
+        )
         llm_provider = None
         command_tasks: set[asyncio.Task[object]] = set()
         gateway_stop = asyncio.Event()
@@ -92,7 +98,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             error = task.exception()
             if error is not None:
                 logger.error(
-                    "summary command task failed error_type=%s",
+                    "qq official command task failed task_name=%s error_type=%s",
+                    task.get_name(),
                     type(error).__name__,
                 )
 
@@ -124,13 +131,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             persisted.id,
                             normalized.platform,
                         )
-                        if (
-                            summary_command_handler is not None
-                            and is_summary_command(normalized)
-                        ):
+                        command_name = command_dispatcher.command_name(normalized)
+                        if command_name is not None:
                             task = asyncio.create_task(
-                                summary_command_handler.handle(normalized),
-                                name="qq-official-summary-command",
+                                command_dispatcher.handle(normalized),
+                                name=f"qq-official-{command_name}-command",
                             )
                             command_tasks.add(task)
                             task.add_done_callback(command_task_finished)
@@ -187,6 +192,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 lookback_minutes=app_settings.summary_command_lookback_minutes,
                 cooldown_seconds=app_settings.summary_command_cooldown_seconds,
             )
+            command_dispatcher = QQOfficialCommandDispatcher(
+                ping_handler=ping_command_handler,
+                summary_handler=summary_command_handler,
+            )
 
         gateway_task = asyncio.create_task(
             handle_dispatch_loop(),
@@ -199,6 +208,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         application.state.qq_gateway_client = gateway_client
         application.state.qq_gateway_task = gateway_task
         application.state.qq_group_message_sender = group_message_sender
+        application.state.qq_command_dispatcher = command_dispatcher
+        application.state.ping_command_handler = ping_command_handler
         application.state.raw_event_repository = raw_repository
         application.state.raw_event_ingestion_service = raw_ingestion_service
         application.state.message_repository = message_repository

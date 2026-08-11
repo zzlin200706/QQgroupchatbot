@@ -314,6 +314,18 @@ async def test_disabled_command_never_generates() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ordinary_text_is_not_routed_to_summary_service() -> None:
+    command_handler, service, repository, sender = handler()
+
+    status = await command_handler.handle(message(TextSegment(0, {}, "你好")))
+
+    assert status is SummaryCommandStatus.NOT_COMMAND
+    assert service.calls == []
+    assert repository.results == []
+    assert sender.calls == []
+
+
+@pytest.mark.asyncio
 async def test_window_persistence_and_send_order_are_explicit() -> None:
     events: list[str] = []
     service = FakeSummaryService()

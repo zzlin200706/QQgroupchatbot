@@ -5,10 +5,15 @@ import pytest
 
 from app.adapters.qq_official.auth import QQAccessToken
 from app.adapters.qq_official.message_api import (
+    QQOfficialMessageAPIAuthenticationError,
     QQOfficialGroupMessageSendResult,
     QQOfficialGroupMessageSender,
-    QQOfficialMessageAPIHTTPError,
+    QQOfficialMessageAPINotFoundError,
+    QQOfficialMessageAPIPermissionError,
+    QQOfficialMessageAPIRateLimitError,
     QQOfficialMessageAPIResponseError,
+    QQOfficialMessageAPIServerError,
+    QQOfficialMessageAPITimeoutError,
     QQOfficialMessageAPITransportError,
 )
 
@@ -52,33 +57,95 @@ async def test_sends_group_passive_reply_with_documented_endpoint_and_fields() -
     assert result == QQOfficialGroupMessageSendResult(
         message_id="reply-id-1",
         timestamp=1_786_000_000,
+        )
+
+
+@pytest.mark.asyncio
+async def test_explicit_msg_seq_is_forwarded_when_provided() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content) == {
+            "content": "pong",
+            "msg_type": 0,
+            "msg_id": "message-id-1",
+            "msg_seq": 3,
+        }
+        return httpx.Response(200, json={"id": "reply-id-3", "timestamp": 123})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        sender = QQOfficialGroupMessageSender(
+            auth_client=FakeAuthClient(),
+            http_client=client,
+        )
+        result = await sender.send_group_message(
+            "group-openid",
+            "pong",
+            msg_id="message-id-1",
+            msg_seq=3,
+        )
+
+    assert result == QQOfficialGroupMessageSendResult(
+        message_id="reply-id-3",
+        timestamp=123,
     )
 
 
 @pytest.mark.asyncio
-async def test_requires_msg_id_for_group_passive_reply() -> None:
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"msg_id": None}, "msg_id"),
+        ({"msg_id": "message-id-1", "msg_seq": 0}, "msg_seq"),
+    ],
+)
+async def test_validates_passive_reply_requirements(
+    kwargs: dict[str, object],
+    match: str,
+) -> None:
     sender = QQOfficialGroupMessageSender(auth_client=FakeAuthClient())
 
-    with pytest.raises(ValueError, match="msg_id"):
-        await sender.send_group_message("group-openid", "summary text")
+    with pytest.raises(ValueError, match=match):
+        await sender.send_group_message("group-openid", "summary text", **kwargs)
 
 
 @pytest.mark.asyncio
-async def test_http_transport_and_response_failures_are_explicit() -> None:
+@pytest.mark.parametrize(
+    ("status", "error_type"),
+    [
+        (401, QQOfficialMessageAPIAuthenticationError),
+        (403, QQOfficialMessageAPIPermissionError),
+        (404, QQOfficialMessageAPINotFoundError),
+        (429, QQOfficialMessageAPIRateLimitError),
+        (503, QQOfficialMessageAPIServerError),
+    ],
+)
+async def test_http_failures_are_mapped_by_status(
+    status: int,
+    error_type: type[Exception],
+) -> None:
     async with httpx.AsyncClient(
-        transport=httpx.MockTransport(lambda request: httpx.Response(429))
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                status,
+                json={"code": 22009, "message": "msg limit exceed"},
+            )
+        )
     ) as client:
         sender = QQOfficialGroupMessageSender(
             auth_client=FakeAuthClient(),
             http_client=client,
         )
-        with pytest.raises(QQOfficialMessageAPIHTTPError, match="HTTP 429"):
+        with pytest.raises(error_type) as caught:
             await sender.send_group_message(
                 "group-openid",
                 "summary text",
                 msg_id="message-id-1",
             )
 
+    assert "test-access-token" not in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_transport_timeout_and_response_failures_are_explicit() -> None:
     def transport_error(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("boom", request=request)
 
@@ -90,6 +157,23 @@ async def test_http_transport_and_response_failures_are_explicit() -> None:
             http_client=client,
         )
         with pytest.raises(QQOfficialMessageAPITransportError):
+            await sender.send_group_message(
+                "group-openid",
+                "summary text",
+                msg_id="message-id-1",
+            )
+
+    def timeout_error(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timeout", request=request)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(timeout_error)
+    ) as client:
+        sender = QQOfficialGroupMessageSender(
+            auth_client=FakeAuthClient(),
+            http_client=client,
+        )
+        with pytest.raises(QQOfficialMessageAPITimeoutError):
             await sender.send_group_message(
                 "group-openid",
                 "summary text",
@@ -109,3 +193,48 @@ async def test_http_transport_and_response_failures_are_explicit() -> None:
                 "summary text",
                 msg_id="message-id-1",
             )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, content=b"nope"))
+    ) as client:
+        sender = QQOfficialGroupMessageSender(
+            auth_client=FakeAuthClient(),
+            http_client=client,
+        )
+        with pytest.raises(QQOfficialMessageAPIResponseError, match="valid JSON"):
+            await sender.send_group_message(
+                "group-openid",
+                "summary text",
+                msg_id="message-id-1",
+            )
+
+
+@pytest.mark.asyncio
+async def test_structured_http_error_redacts_access_token_and_authorization() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            json={
+                "code": 22009,
+                "message": (
+                    "msg limit exceed QQBot test-access-token "
+                    'access_token=test-access-token token=test-access-token'
+                ),
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        sender = QQOfficialGroupMessageSender(
+            auth_client=FakeAuthClient(),
+            http_client=client,
+        )
+        with pytest.raises(QQOfficialMessageAPIRateLimitError) as caught:
+            await sender.send_group_message(
+                "group-openid",
+                "summary text",
+                msg_id="message-id-1",
+            )
+
+    text = str(caught.value)
+    assert "test-access-token" not in text
+    assert "QQBot <REDACTED>" in text

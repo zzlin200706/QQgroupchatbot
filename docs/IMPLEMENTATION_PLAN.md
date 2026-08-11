@@ -150,6 +150,77 @@ OPENAI_COMPATIBLE_MODEL=gpt-5.6-luna
 - 最终请求应为 `{base_url}/chat/completions`
 - 不把 relay group / GptPro / long_context / model routing 写进业务层或 request payload
 
+## Current Phase — QQ Official Bot Actions + Command E2E
+
+### 目标
+
+把当前 QQ Official 入站消息链路和 Bot Actions 接通，但范围只限明确命令：
+
+```text
+#ping
+#总结
+```
+
+普通群消息在本阶段仍然不触发 LLM：
+
+```text
+测试bot
+你好
+帮我解释一下 xxx
+```
+
+### 目标链路
+
+`#ping`
+
+```text
+QQ Official Gateway
+→ raw event
+→ QQOfficialMessageParser
+→ InternalMessage
+→ SQLite
+→ exact command match
+→ QQOfficialGroupMessageSender
+→ passive reply: pong
+```
+
+`#总结`
+
+```text
+QQ Official Gateway
+→ raw event
+→ QQOfficialMessageParser
+→ InternalMessage
+→ SQLite
+→ exact command match
+→ ConversationQueryService
+→ MessageRenderer
+→ SummaryService
+→ LLMProvider
+→ OpenAICompatibleProvider
+→ validated SummaryResult
+→ SummaryRepository
+→ SummaryMessageFormatter
+→ QQOfficialGroupMessageSender
+→ passive group reply
+```
+
+### 约束
+
+- 不改 `InternalMessage` 的 sender / author attribution 规则
+- 不把 `group_openid`、`msg_id` 塞进 `IdentityRef`
+- 不让 `SummaryService` 直接调用 QQ API
+- 不让 QQ adapter 直接调用 LLM
+- `#总结` 继续使用当前 `SUMMARY_COMMAND_LOOKBACK_MINUTES`
+- `#总结` 继续使用当前 cooldown / in-progress 保护
+
+### 当前状态
+
+- implementation validated
+- real QQ smoke pending
+- 尚未做真实群 `#ping`
+- 尚未做真实群 `#总结`
+
 ## Next Phase — Provider Configuration / Selection
 
 在 provider 扩展后，加入最小可用的 provider 选择配置：

@@ -22,11 +22,18 @@ from app.adapters.qq_official.gateway import (
     QQOfficialGatewayTransportError,
 )
 from app.adapters.qq_official.message_api import (
+    QQOfficialMessageAPIAuthenticationError,
     QQOfficialGroupMessageSendResult,
     QQOfficialGroupMessageSender,
     QQOfficialMessageAPIError,
     QQOfficialMessageAPIHTTPError,
+    QQOfficialMessageAPINotFoundError,
+    QQOfficialMessageAPIPermissionError,
+    QQOfficialMessageAPIRequestError,
+    QQOfficialMessageAPIRateLimitError,
     QQOfficialMessageAPIResponseError,
+    QQOfficialMessageAPIServerError,
+    QQOfficialMessageAPITimeoutError,
     QQOfficialMessageAPITransportError,
 )
 
@@ -50,8 +57,15 @@ __all__ = [
     "QQOfficialGatewayTransportError",
     "QQOfficialGroupMessageSendResult",
     "QQOfficialGroupMessageSender",
+    "QQOfficialMessageAPIAuthenticationError",
     "QQOfficialMessageAPIError",
     "QQOfficialMessageAPIHTTPError",
+    "QQOfficialMessageAPINotFoundError",
+    "QQOfficialMessageAPIPermissionError",
+    "QQOfficialMessageAPIRequestError",
+    "QQOfficialMessageAPIRateLimitError",
     "QQOfficialMessageAPIResponseError",
+    "QQOfficialMessageAPIServerError",
+    "QQOfficialMessageAPITimeoutError",
     "QQOfficialMessageAPITransportError",
 ]

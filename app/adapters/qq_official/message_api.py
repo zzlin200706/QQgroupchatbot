@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Mapping, Protocol
 
@@ -21,9 +22,50 @@ class QQOfficialMessageAPIError(RuntimeError):
 class QQOfficialMessageAPIHTTPError(QQOfficialMessageAPIError):
     """Outbound OpenAPI returned a non-success HTTP status."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int,
+        api_code: str | int | None = None,
+        api_message: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.api_code = api_code
+        self.api_message = api_message
+
+
+class QQOfficialMessageAPIAuthenticationError(QQOfficialMessageAPIHTTPError):
+    """Outbound OpenAPI rejected authentication."""
+
+
+class QQOfficialMessageAPIPermissionError(QQOfficialMessageAPIHTTPError):
+    """Outbound OpenAPI rejected authorization or permission."""
+
+
+class QQOfficialMessageAPINotFoundError(QQOfficialMessageAPIHTTPError):
+    """Outbound OpenAPI did not find the target resource."""
+
+
+class QQOfficialMessageAPIRateLimitError(QQOfficialMessageAPIHTTPError):
+    """Outbound OpenAPI rejected the request due to frequency limiting."""
+
+
+class QQOfficialMessageAPIServerError(QQOfficialMessageAPIHTTPError):
+    """Outbound OpenAPI returned a server-side failure."""
+
+
+class QQOfficialMessageAPIRequestError(QQOfficialMessageAPIHTTPError):
+    """Outbound OpenAPI rejected a malformed or invalid request."""
+
 
 class QQOfficialMessageAPITransportError(QQOfficialMessageAPIError):
     """Outbound OpenAPI could not be reached."""
+
+
+class QQOfficialMessageAPITimeoutError(QQOfficialMessageAPITransportError):
+    """Outbound OpenAPI timed out."""
 
 
 class QQOfficialMessageAPIResponseError(QQOfficialMessageAPIError):
@@ -38,6 +80,18 @@ class AccessTokenProvider(Protocol):
 class QQOfficialGroupMessageSendResult:
     message_id: str
     timestamp: int | None
+
+
+@dataclass(frozen=True)
+class QQOfficialMessageAPIErrorDetail:
+    code: str | int | None
+    message: str | None
+
+
+_QQBOT_AUTH_PATTERN = re.compile(r"(?i)\bQQBot\s+\S+")
+_SECRET_ASSIGNMENT_PATTERN = re.compile(
+    r'(?i)("?(?:access_token|authorization|token|client_secret|app_secret)"?\s*[:=]\s*"?)([^",\s]+)'
+)
 
 
 class QQOfficialGroupMessageSender:
@@ -64,6 +118,7 @@ class QQOfficialGroupMessageSender:
         message: str,
         *,
         msg_id: str | None = None,
+        msg_seq: int | None = None,
     ) -> QQOfficialGroupMessageSendResult:
         if not group_id.strip():
             raise ValueError("group_id must not be empty")
@@ -71,13 +126,17 @@ class QQOfficialGroupMessageSender:
             raise ValueError("message must not be empty")
         if msg_id is None or not msg_id.strip():
             raise ValueError("msg_id is required for QQ Official group passive replies")
+        if msg_seq is not None and (
+            isinstance(msg_seq, bool) or not isinstance(msg_seq, int) or msg_seq < 1
+        ):
+            raise ValueError("msg_seq must be a positive integer when provided")
 
         access_token = await self._auth_client.fetch_access_token()
         payload = {
             "content": message,
             "msg_type": 0,
             "msg_id": msg_id,
-            "msg_seq": 1,
+            "msg_seq": 1 if msg_seq is None else msg_seq,
         }
         if self._http_client is not None:
             return await self._send_with_client(
@@ -112,15 +171,17 @@ class QQOfficialGroupMessageSender:
                 json=payload,
                 timeout=self._timeout_seconds,
             )
+        except httpx.TimeoutException as error:
+            raise QQOfficialMessageAPITimeoutError(
+                "QQ Official group message request timed out"
+            ) from error
         except httpx.RequestError as error:
             raise QQOfficialMessageAPITransportError(
                 "QQ Official group message request failed"
             ) from error
 
         if not response.is_success:
-            raise QQOfficialMessageAPIHTTPError(
-                f"QQ Official group message request returned HTTP {response.status_code}"
-            )
+            raise _http_error(response, access_token=access_token)
 
         try:
             data = response.json()
@@ -145,6 +206,90 @@ def _parse_send_result(payload: object) -> QQOfficialGroupMessageSendResult:
         message_id=message_id,
         timestamp=_as_int(payload.get("timestamp")),
     )
+
+
+def _http_error(
+    response: httpx.Response,
+    *,
+    access_token: str,
+) -> QQOfficialMessageAPIHTTPError:
+    detail = _error_detail(response, access_token=access_token)
+    message = f"QQ Official group message request returned HTTP {response.status_code}"
+    if detail.code is not None:
+        message += f" code={detail.code}"
+    if detail.message:
+        message += f" message={detail.message}"
+
+    if response.status_code == 401:
+        error_type = QQOfficialMessageAPIAuthenticationError
+    elif response.status_code == 403:
+        error_type = QQOfficialMessageAPIPermissionError
+    elif response.status_code == 404:
+        error_type = QQOfficialMessageAPINotFoundError
+    elif response.status_code == 429:
+        error_type = QQOfficialMessageAPIRateLimitError
+    elif response.status_code >= 500:
+        error_type = QQOfficialMessageAPIServerError
+    else:
+        error_type = QQOfficialMessageAPIRequestError
+    return error_type(
+        message,
+        status_code=response.status_code,
+        api_code=detail.code,
+        api_message=detail.message,
+    )
+
+
+def _error_detail(
+    response: httpx.Response,
+    *,
+    access_token: str,
+) -> QQOfficialMessageAPIErrorDetail:
+    try:
+        payload = response.json()
+    except ValueError:
+        return QQOfficialMessageAPIErrorDetail(code=None, message=None)
+    if not isinstance(payload, Mapping):
+        return QQOfficialMessageAPIErrorDetail(code=None, message=None)
+    nested_error = payload.get("error")
+    if isinstance(nested_error, Mapping):
+        return QQOfficialMessageAPIErrorDetail(
+            code=_error_code(payload.get("code") or nested_error.get("code")),
+            message=_error_message(nested_error, access_token=access_token),
+        )
+    return QQOfficialMessageAPIErrorDetail(
+        code=_error_code(payload.get("code")),
+        message=_error_message(payload, access_token=access_token),
+    )
+
+
+def _error_code(value: object) -> str | int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (str, int)):
+        return value
+    return None
+
+
+def _error_message(
+    payload: Mapping[str, object],
+    *,
+    access_token: str,
+) -> str | None:
+    for candidate in (
+        payload.get("message"),
+        payload.get("msg"),
+        payload.get("error"),
+    ):
+        if isinstance(candidate, str) and candidate.strip():
+            return _sanitize(candidate, access_token=access_token)
+    return None
+
+
+def _sanitize(value: str, *, access_token: str) -> str:
+    sanitized = _QQBOT_AUTH_PATTERN.sub("QQBot <REDACTED>", value)
+    sanitized = _SECRET_ASSIGNMENT_PATTERN.sub(r"\1<REDACTED>", sanitized)
+    return sanitized.replace(access_token, "<REDACTED>")
 
 
 def _non_empty_string(value: object) -> str | None:
