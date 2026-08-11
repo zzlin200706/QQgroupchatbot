@@ -7,8 +7,14 @@ from app.config import Settings
 
 
 def test_phase_h_defaults_and_secret_redaction() -> None:
-    settings = Settings(_env_file=None, deepseek_api_key="private-test-key")
+    settings = Settings(
+        _env_file=None,
+        deepseek_api_key="private-test-key",
+        openai_compatible_api_key="private-relay-key",
+    )
 
+    assert settings.llm_provider == "deepseek"
+    assert settings.llm_max_output_tokens == 4096
     assert settings.qq_api_timeout_seconds == 10
     assert settings.qq_gateway_reconnect_initial_delay_seconds == 1
     assert settings.qq_gateway_reconnect_max_delay_seconds == 30
@@ -16,22 +22,32 @@ def test_phase_h_defaults_and_secret_redaction() -> None:
     assert settings.deepseek_model == "deepseek-v4-flash"
     assert settings.deepseek_timeout_seconds == 60
     assert settings.deepseek_max_retries == 2
-    assert settings.deepseek_max_output_tokens == 4096
+    assert settings.openai_compatible_base_url == ""
+    assert settings.openai_compatible_model == "gpt-5.6-luna"
+    assert settings.openai_compatible_timeout_seconds == 60
+    assert settings.openai_compatible_max_retries == 2
     assert settings.summary_max_messages == 500
     assert settings.summary_max_input_chars == 120000
     assert settings.summary_command_enabled is False
     assert settings.summary_command_lookback_minutes == 120
     assert settings.summary_command_cooldown_seconds == 60
     assert settings.deepseek_api_key.get_secret_value() == "private-test-key"
+    assert (
+        settings.openai_compatible_api_key.get_secret_value()
+        == "private-relay-key"
+    )
     assert "private-test-key" not in repr(settings)
+    assert "private-relay-key" not in repr(settings)
 
 
 @pytest.mark.parametrize(
     "override",
     [
+        {"llm_max_output_tokens": 0},
         {"deepseek_timeout_seconds": 0},
         {"deepseek_max_retries": -1},
-        {"deepseek_max_output_tokens": 0},
+        {"openai_compatible_timeout_seconds": 0},
+        {"openai_compatible_max_retries": -1},
         {"summary_max_messages": 0},
         {"summary_max_input_chars": 0},
         {"summary_command_lookback_minutes": 0},

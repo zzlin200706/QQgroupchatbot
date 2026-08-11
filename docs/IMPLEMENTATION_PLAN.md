@@ -101,11 +101,11 @@
 - 即使官方文档当前仍描述主动消息规则，本项目当前验证目标仍只覆盖由入站消息触发的被动回复
 - 不把“只有 `group_id` 的主动群发”纳入当前 phase
 
-## Next Phase — OpenAICompatibleProvider
+## Current Phase — OpenAICompatibleProvider + Relay Integration
 
 ### 目标
 
-DeepSeek 文本闭环跑通后，下一阶段立即实现：
+在保留现有 `DeepSeekProvider` 的前提下，新增第二个 provider：
 
 ```text
 SummaryService
@@ -113,6 +113,14 @@ SummaryService
 → OpenAICompatibleProvider
 → 中转站 API
 ```
+
+当前实际部署目标：
+
+- `LLM_PROVIDER=openai_compatible`
+- `OPENAI_COMPATIBLE_BASE_URL=https://4router.net/v1`
+- `OPENAI_COMPATIBLE_MODEL=gpt-5.6-luna`
+- relay token 侧已选择 `GptPro` 分组，但应用程序不处理任何 group / pool / channel / multiplier 概念
+- `long_context` 当前禁用，程序不发送相关参数
 
 ### 要求
 
@@ -129,16 +137,18 @@ SummaryService
 
 ### 预期配置
 
-这是 future 设计，不代表当前已经实现：
-
 ```dotenv
 LLM_PROVIDER=openai_compatible
-LLM_BASE_URL=
-LLM_API_KEY=
-LLM_MODEL=
+OPENAI_COMPATIBLE_BASE_URL=
+OPENAI_COMPATIBLE_API_KEY=
+OPENAI_COMPATIBLE_MODEL=gpt-5.6-luna
 ```
 
-不要把中转站品牌、域名或具体模型名硬编码到业务层。
+说明：
+
+- `OPENAI_COMPATIBLE_BASE_URL` 表示服务商给出的完整 OpenAI-compatible base URL，可直接是 `.../v1`
+- 最终请求应为 `{base_url}/chat/completions`
+- 不把 relay group / GptPro / long_context / model routing 写进业务层或 request payload
 
 ## Next Phase — Provider Configuration / Selection
 

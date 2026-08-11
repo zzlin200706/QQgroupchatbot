@@ -11,6 +11,8 @@ class Settings(BaseSettings):
 
     app_env: str = "development"
     log_level: str = "INFO"
+    llm_provider: str = "deepseek"
+    llm_max_output_tokens: int = Field(default=4096, gt=0)
 
     qq_bot_app_id: str = ""
     qq_bot_app_secret: str = ""
@@ -25,7 +27,12 @@ class Settings(BaseSettings):
     deepseek_model: str = "deepseek-v4-flash"
     deepseek_timeout_seconds: float = Field(default=60.0, gt=0)
     deepseek_max_retries: int = Field(default=2, ge=0)
-    deepseek_max_output_tokens: int = Field(default=4096, gt=0)
+
+    openai_compatible_api_key: SecretStr = SecretStr("")
+    openai_compatible_base_url: str = ""
+    openai_compatible_model: str = "gpt-5.6-luna"
+    openai_compatible_timeout_seconds: float = Field(default=60.0, gt=0)
+    openai_compatible_max_retries: int = Field(default=2, ge=0)
 
     summary_max_messages: int = Field(default=500, ge=1)
     summary_max_input_chars: int = Field(default=120000, ge=1)

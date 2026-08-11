@@ -19,7 +19,7 @@ from app.adapters.qq_official import (
     QQOfficialGroupMessageSender,
 )
 from app.config import Settings, get_settings
-from app.llm.providers import DeepSeekProvider
+from app.llm.providers import create_llm_provider
 from app.parsers.qq_official_message_parser import QQOfficialMessageParser
 from app.rendering import MessageRenderer, SummaryMessageFormatter
 from app.services.conversation_query import ConversationQueryService
@@ -81,7 +81,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             http_client=qq_http_client,
         )
         summary_command_handler: SummaryCommandHandler | None = None
-        deepseek_provider: DeepSeekProvider | None = None
+        llm_provider = None
         command_tasks: set[asyncio.Task[object]] = set()
         gateway_stop = asyncio.Event()
 
@@ -169,20 +169,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
 
         if app_settings.summary_command_enabled:
-            deepseek_provider = DeepSeekProvider(
-                api_key=app_settings.deepseek_api_key.get_secret_value(),
-                base_url=app_settings.deepseek_base_url,
-                model=app_settings.deepseek_model,
-                timeout_seconds=app_settings.deepseek_timeout_seconds,
-                max_retries=app_settings.deepseek_max_retries,
-            )
+            llm_provider = create_llm_provider(app_settings)
             summary_service = SummaryService(
                 query_service=ConversationQueryService(message_repository),
                 renderer=MessageRenderer(),
-                provider=deepseek_provider,
+                provider=llm_provider,
                 max_messages=app_settings.summary_max_messages,
                 max_input_chars=app_settings.summary_max_input_chars,
-                max_output_tokens=app_settings.deepseek_max_output_tokens,
+                max_output_tokens=app_settings.llm_max_output_tokens,
             )
             summary_command_handler = SummaryCommandHandler(
                 summary_service=summary_service,
@@ -222,8 +216,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if command_tasks:
                 await asyncio.gather(*command_tasks, return_exceptions=True)
             await gateway_client.close()
-            if deepseek_provider is not None:
-                await deepseek_provider.aclose()
+            if llm_provider is not None:
+                await llm_provider.aclose()
             await qq_http_client.aclose()
             await database.dispose()
 
