@@ -1,403 +1,405 @@
-# ARCHITECTURE.md — qqgroupchatbot 架构设计
+# ARCHITECTURE.md
 
-## 1. 总体数据流
+文档更新时间：`2026-08-11`
 
-```text
-┌──────────────────────────────┐
-│ 独立 QQ Bot 账号             │
-└───────────────┬──────────────┘
-                │ NTQQ
-                ▼
-┌──────────────────────────────┐
-│ NapCatQQ                     │
-│ OneBot 11                    │
-└───────────────┬──────────────┘
-                │ WebSocket
-                ▼
-┌──────────────────────────────┐
-│ OneBot Adapter               │
-│ connect / reconnect / action │
-└───────────────┬──────────────┘
-                │ raw JSON
-                ▼
-┌──────────────────────────────┐
-│ Event Normalizer             │
-└───────────────┬──────────────┘
-                ▼
-┌──────────────────────────────┐
-│ Message Parser               │
-│ pure raw-data parsing        │
-└───────────────┬──────────────┘
-                ▼
-┌──────────────────────────────┐
-│ Internal Message Model       │
-└──────────┬───────────┬───────┘
-           │           │
-           ▼           ▼
-      ┌─────────┐  ┌──────────┐
-      │ Storage │  │ Bot Cmds │
-      └────┬────┘  └────┬─────┘
-           │             │
-      ┌────▼─────┐       │
-      │ FastAPI  │       │
-      │ Query    │       │
-      └──────────┘       │
-                         ▼
-                  OneBot Actions
-```
+## 项目定位
 
-未来 AI：
+`qqgroupchatbot` 是一个运行在 VMware Ubuntu 上的轻量、单机 `QQ Official Bot` 群聊 AI Bot。
+
+active design 只围绕：
 
 ```text
-Storage
-  ↓
-Conversation Query
-  ↓
-Message Renderer
-  ↓
-Summary / QA
-  ↓
-LLM Provider
-  ↓
-Bot Actions
+QQ Official Gateway / OpenAPI
++ Python
++ SQLite
++ local filesystem
++ external LLM API
 ```
 
----
+展开，不再维护 QQ 小号 + NapCat + OneBot 双路线架构。
 
-## 2. 为什么不用“一个 FastAPI webhook + 一个 messages 表”
+## 当前运行时架构
 
-因为这个项目不是纯文本聊天机器人。
-
-QQ 消息可能包含：
+当前代码已经落地并由测试覆盖的核心数据流是：
 
 ```text
-message
-├── text
-├── at
-├── image
-├── reply
-└── forward
-    ├── node(sender=B)
-    │   └── text
-    └── node(sender=C)
-        └── forward
-            └── node(sender=unknown)
-                └── image
-```
-
-如果最开始转换成：
-
-```text
-sender=A
-content="..."
-```
-
-会永久丢失：
-
-- 消息段顺序；
-- reply 关系；
-- image/file 元数据；
-- forward 层级；
-- node sender；
-- nested forward sender；
-- 作者是否未知。
-
-因此内部模型必须是树。
-
----
-
-## 3. Adapter 与业务分离
-
-`OneBotAdapter` 对上层暴露概念接口：
-
-```python
-async def run_event_loop(...)
-async def call_action(action: str, params: dict) -> dict
-async def get_message(message_id: str) -> dict
-async def get_forward_message(forward_id: str) -> dict
-async def send_group_message(group_id: str, message: object) -> dict
-```
-
-这里是概念接口，不表示 OneBot 当前 action 参数一定完全如此。
-
-实现 action 前必须依据当前 NapCat / OneBot 文档确认参数字段。
-
----
-
-## 4. Event Normalizer
-
-输入：
-
-```python
-raw_event: dict
-```
-
-输出：
-
-```python
-NormalizedEvent
-```
-
-Normalizer 不应该递归请求 forward 内容。
-
-它只确定：
-
-- platform；
-- event kind；
-- top-level group；
-- top-level sender；
-- timestamp；
-- platform message id；
-- raw message segments；
-- raw event reference。
-
-复杂解析交给 Parser。
-
----
-
-## 5. Message Parser and Reference Enrichment
-
-建议主接口：
-
-```python
-def parse_message(
-    raw_event: dict,
-    *,
-    raw_event_id: int | None,
-) -> InternalMessage | None
-```
-
-Parser 是 raw-data-first 的纯解析层：不访问 WebSocket、不调用 OneBot action、不写数据库，输入也不
-会被修改。它可保留 embedded forward 的递归树，但只有 forward id 时保持 unresolved。
-
-可选的后续 enrichment 才通过 adapter action 补全 reference：
-
-```text
+QQ Official Gateway
+        ↓
+QQOfficialGatewayClient
+        ↓
+QQGatewayDispatch
+        ↓
+QQOfficialRawEventIngestionService
+        ↓
+raw_events
+        ↓
+QQOfficialMessageParser
+        ↓
 InternalMessage
-  ↓
-ReferenceEnrichmentService
-  ├─ reply id   → get_msg
-  └─ forward id → get_forward_msg
+        ↓
+MessageRepository
+        ↓
+SQLite
+        ↓
+ConversationQueryService
+        ↓
+MessageRenderer
+        ↓
+SummaryService
+        ↓
+LLMProvider
+        ↓
+validated SummaryResult
+        ↓
+SummaryRepository
+        ↓
+SummaryMessageFormatter
+        ↓
+QQOfficialGroupMessageSender
+        ↓
+QQ Official passive reply
 ```
 
-enrichment 返回新对象，并保留原对象的 raw data。它不在收包 callback 中执行。本阶段只补全直接
-unresolved reference；nested unresolved forward 的网络递归、循环检测及 traversal 留给后续 Phase 6。
+其中：
 
-```text
-forward event content present → parser marks embedded
-forward id only             → parser marks unresolved
-optional get_forward_msg    → enrichment marks fetched or a safe failure status
+- `raw_events`、`messages`、`message_nodes`、`summaries` 都在同一个 SQLite 中
+- `FastAPI` 当前只提供 `/health` 和应用生命周期托管
+- `SUMMARY_COMMAND_ENABLED=false` 时，不启动 summary handler，但 raw/normalized persistence 仍正常工作
+- 当前 summary reply 只走由入站消息触发的被动回复链路，不把“只有 `group_id` 的主动群发”当作当前 phase 范围
+
+## 当前已落地组件
+
+### `app/adapters/qq_official/`
+
+- `auth.py`：AccessToken 获取
+- `gateway.py`：`/gateway/bot`、HELLO / IDENTIFY / HEARTBEAT、dispatch、reconnect state
+- `message_api.py`：群消息发送
+- `redaction.py`：本地 sample 与日志安全脱敏
+
+### `app/parsers/`
+
+- `qq_official_message_parser.py`：把仓库约定的 raw envelope 解析成 `InternalMessage`
+
+### `app/domain/messages/`
+
+- 严格的内部消息模型、身份模型、provenance 与 segment 树
+
+### `app/storage/`
+
+- `raw_event_repository.py`
+- `message_repository.py`
+- `summary_repository.py`
+- `message_codec.py` / `summary_codec.py`
+
+### `app/services/`
+
+- `QQOfficialRawEventIngestionService`
+- `QQOfficialNormalizedMessageIngestionService`
+- `ConversationQueryService`
+- `SummaryService`
+- `SummaryCommandHandler`
+
+### `app/rendering/`
+
+- `MessageRenderer`
+- `SummaryMessageFormatter`
+
+### `app/llm/`
+
+- `LLMRequest` / `LLMResponse`
+- `LLMProvider` 协议
+- `DeepSeekProvider`
+
+## 当前组件边界
+
+### Gateway Client
+
+- 负责获取接入点、建立 WebSocket、处理 HELLO / IDENTIFY / HEARTBEAT、收 dispatch、重连。
+- 不做 parser。
+- 不做数据库业务。
+- 不做 summary 或 LLM 调用。
+
+### Raw Event Ingestion
+
+- 负责把 `QQGatewayDispatch` 写入 `raw_events`。
+- 存储的 envelope 统一为：
+
+```json
+{
+  "gateway": {
+    "op": 0,
+    "s": 123,
+    "t": "GROUP_MESSAGE_CREATE"
+  },
+  "data": {
+    "...": "..."
+  }
+}
 ```
 
----
+- 只复制明确存在的 query/debug index。
+- `raw_payload` 永远保留完整事实。
 
-## 6. 身份传播规则
+### Parser
 
-只允许“明确来源”传播。
+- 只消费上面的 raw envelope。
+- 不访问网络。
+- 不推断缺失身份。
+- 只在 payload 或 sample 明确给出时结构化 `mentions`、`attachments` 等字段。
 
-### 顶层群消息
+当前 parser 的几个关键边界：
 
-```text
-event_sender = event.sender
-message_author = event.sender
+- `message_type == 102`：保存为 unresolved `ForwardSegment`
+- `message_type == 103`：reply 只保存 opaque `msg_elements` / `message_scene`
+- mention 只有在 `content` token 与 `mentions[]` 明确对应时才生成 `AtSegment`
+- 未确认结构一律保留为 `UnknownSegment`
+
+未来如果需要 reply / forward 补全，应该通过概念接口实现，而不是把某个平台 action 名称写死成领域边界。例如：
+
+```python
+class MessageReferenceResolver:
+    async def resolve_reply(...):
+        ...
+
+    async def resolve_forward(...):
+        ...
 ```
 
-这是因为当前 message 就是该 event_sender 在群内发送的消息。
+当前 runtime 尚未实现这一层。
 
-### forward segment
+### Storage
+
+- `raw_events` 是 parser replay 和字段追溯的事实源头
+- `messages + message_nodes` 当前用于保存可重建的 `InternalMessage` 树
+- `summaries` 只保存 validated summary result 与最小必要元数据
+- 不保存 prompt、完整 conversation、provider body 或 secret
+
+### Rendering
+
+- `MessageRenderer` 负责把严格的 `InternalMessage[]` 渲染成给 LLM 的有损文本
+- renderer 可以为 presentation 做有损折叠
+- renderer 不能反过来成为事实源头
+
+### Summary
+
+- `SummaryService` 只依赖：
 
 ```text
-forwarder = 当前包含 forward segment 的 message_author
+ConversationQueryService
+MessageRenderer
+LLMProvider
 ```
 
-但是：
+- 不直接依赖 Gateway、QQ HTTP、SQLAlchemy 或具体 provider 实现
+- 当前 summary command 的顺序固定为：
 
 ```text
-forward_node.author
+generate
+→ persist
+→ format
+→ send
 ```
 
-必须来自 node 自身返回数据。
+### Outbound
 
-如果 node 没有作者：
+- `QQOfficialGroupMessageSender` 只负责 token、HTTP 请求与响应校验
+- 不做 prompt、上下文选择、summary 逻辑
+
+## LLM 边界
+
+当前 LLM 架构已经稳定为：
 
 ```text
-unknown
+ConversationQueryService
+        ↓
+InternalMessage[]
+        ↓
+MessageRenderer
+        ↓
+SummaryService
+        ↓
+LLMProvider
+        ↓
+validated domain result
 ```
 
-绝不继承 forwarder。
+`DeepSeekProvider` 只是当前第一个真实 provider，不是业务层依赖对象。
 
-### nested forward
+禁止：
 
-同样逐层处理。
-
----
-
-## 7. 存储建议
-
-### raw_event
-
-任何 parser 崩溃都不能导致 raw event 丢失。
-
-推荐 ingest 顺序：
-
-```text
-receive raw event
-      ↓
-dedup
-      ↓
-save raw event
-      ↓
-commit
-      ↓
-normalize / parse
-      ↓
-save normalized form
+```python
+prompt = str(raw_gateway_payload)
 ```
 
-如果 parse 失败：
+也禁止让业务 Service 直接面向某个具体平台品牌。
+
+## 未来目标架构
+
+在保持单机轻量部署前提下，后续 phase 的目标架构统一按下面的概念边界扩展：
 
 ```text
-raw_event.status = parse_failed
-error = ...
+QQ Official Gateway
+        ↓
+QQOfficialGatewayClient
+        ↓
+QQGatewayDispatch
+        ↓
+QQOfficialRawEventIngestionService
+        ↓
+raw_events
+        ↓
+QQOfficialMessageParser
+        ↓
+InternalMessage
+        ↓
+MessageRepository
+        ↓
+SQLite
+        ↓
+ConversationQueryService
+        ↓
+MessageRenderer
+        ↓
+AI Processing
+        ↓
+LLMProvider
+        ↓
+Summary / Chat / QA
+        ↓
+Bot Action / Outbound Service
+        ↓
+QQ Official OpenAPI
 ```
 
-以后可以 replay。
-
-### normalized tree
-
-可以选择两种方式：
-
-A. 多表关系模型；
-B. messages + generic message_nodes 表。
-
-第一版推荐 B，减少 schema 频繁变化。
-
-例如概念上：
+AI 部分的 future 形态是：
 
 ```text
+InternalMessage[]
+        ↓
+ConversationContextService          # future
+        ↓
+MessageRenderer / MultimodalContentBuilder   # future
+        ↓
+LLMProvider
+        ├── DeepSeekProvider
+        └── OpenAICompatibleProvider         # future
+        ↓
+validated domain result
+```
+
+其中以下组件是 `future`，本次不是已实现功能：
+
+- `ConversationContextService`
+- `TriggerPolicy`
+- `ChatReplyService`
+- `QAService`
+- `MediaResolver`
+- `MultimodalPolicy`
+- `MultimodalContentBuilder`
+- `OpenAICompatibleProvider`
+
+## 触发策略
+
+当前 runtime 只实现严格的 `#总结`：
+
+```text
+platform == "qq_official"
+provenance == direct_event
+sub_type == GROUP_MESSAGE_CREATE
+top-level exact text == #总结
+group_id exists
+platform_message_id exists
+timestamp is timezone-aware
+```
+
+未来扩展的触发边界应该通过 `TriggerPolicy` 表达，例如：
+
+- `SummaryCommandTrigger`
+- `MentionTrigger`
+- `ReplyTrigger`
+- `PendingInteractionTrigger`
+
+但这些都是 future，不要在当前业务逻辑里提前写死。
+
+## Storage 路线
+
+本项目的 storage 方向是：
+
+> Internal Message Model 严格，Storage implementation 轻量。
+
+当前表结构：
+
+```text
+raw_events
 messages
 message_nodes
-identities
-raw_events
+summaries
 ```
 
-`message_nodes`：
+这是当前有效实现，不要求为了“更规范”继续拆成更多子表。
+
+默认长期部署方案仍然是：
 
 ```text
-id
-message_id
-parent_node_id
-node_kind
-position
-depth
-author_id
-author_name
-author_status
-author_source
-payload_json
+SQLite
++ local filesystem
 ```
 
-这样 text/image/forward/forward_node 都可以表达成树节点。
-
-如果 Codex 判断多表更清晰，也可以实现，但必须保证完整树结构可重建。
-
----
-
-## 8. 消息重放
-
-因为保存了 raw event，可以提供 parser 升级后的重放能力：
+对于未来图片/媒体能力，推荐保留：
 
 ```text
-raw_events
-    ↓
-replay
-    ↓
-new parser version
-    ↓
-normalized representation
+data/
+├── qqgroupchatbot.db
+└── media/
+    └── ...
 ```
 
-建议保留：
+SQLite 保存 metadata、relative path、sha256、download status、derived description reference；不要默认把大图片作为 SQLite BLOB 保存。
+
+## FastAPI 定位
+
+FastAPI 不是 Bot 本身，只作为：
 
 ```text
-parser_version
-normalizer_version
+health
+debug
+query
+admin
+manual API
 ```
 
-第一版可以是常量字符串。
+当前已实现 `/health`。未来可以增加 message history、summaries、manual replay，但不需要为了“标准后台”建立大量 CRUD。
 
----
+## 推荐目录方向
 
-## 9. 并发
-
-消息进入时不要让长时间的 forward resolution 阻塞所有事件。
-
-但是第一阶段也不要上复杂队列。
-
-可以：
+当前仓库实际结构已经接近下面的方向：
 
 ```text
-WS receive loop
-  ↓
-bounded asyncio.Queue
-  ↓
-1~N ingest worker
+app/
+├── adapters/
+│   └── qq_official/
+├── domain/
+│   ├── messages/
+│   └── summaries/
+├── parsers/
+│   └── qq_official_message_parser.py
+├── storage/
+├── rendering/
+├── services/
+│   ├── conversation_query.py
+│   ├── summary.py
+│   ├── summary_command.py
+│   ├── conversation_context.py      # future
+│   ├── chat_reply.py                # future
+│   └── media.py                     # future
+├── llm/
+│   ├── models.py
+│   └── providers/
+│       ├── base.py
+│       ├── deepseek.py
+│       └── openai_compatible.py     # future
+└── bot_actions/
+    └── qq_official/                 # future abstraction
 ```
 
-要求：
-
-- queue 有容量上限；
-- shutdown 可优雅等待；
-- 同一 event 去重；
-- SQLite 写并发保持保守。
-
-默认 1 个 DB ingest worker 完全可接受。
-
----
-
-## 10. 故障策略
-
-### NapCat 断线
-
-- 指数退避；
-- 有上限；
-- 成功后重置退避；
-- `/health` 显示 disconnected。
-
-### OneBot action timeout
-
-- action 有 timeout；
-- forward resolution 失败时保留 unresolved forward；
-- 不让整条消息丢失。
-
-### DB 写失败
-
-- 记录 error；
-- 不把事件标记为成功；
-- 不伪造成功。
-
----
-
-## 11. AI 层边界
-
-未来增加：
-
-```text
-app/ai/
-├── providers/
-├── renderer.py
-├── summarizer.py
-└── qa.py
-```
-
-AI 看见的内容是 Renderer 输出，而不是 QQ raw JSON。
-
-Renderer 可以按需求把树“渲染”为文本，但存储层仍保持完整树。
-
-这就是：
-
-```text
-storage representation != LLM prompt representation
-```
-
-二者不要混为一谈。
+标注为 `future` 的文件不代表当前应立即创建。
