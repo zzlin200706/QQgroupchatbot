@@ -1,7 +1,7 @@
 """Application services that coordinate adapters, parsers, and storage."""
 
 from app.services.command_dispatch import QQOfficialCommandDispatcher
-from app.services.command_status import CommandStatus
+from app.services.command_status import CommandStatus, is_valid_command_context
 from app.services.conversation_query import ConversationQueryService
 from app.services.group_assistant import GroupAssistantService
 from app.services.group_assistant_context import GroupAssistantContextBuilder
@@ -17,6 +17,7 @@ from app.services.summary_command import SummaryCommandHandler, is_summary_comma
 
 __all__ = [
     "CommandStatus",
+    "is_valid_command_context",
     "QQOfficialCommandDispatcher",
     "ConversationQueryService",
     "GroupAssistantContextBuilder",

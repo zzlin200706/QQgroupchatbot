@@ -8,7 +8,7 @@ from collections.abc import Callable
 from datetime import timedelta
 from typing import Protocol
 
-from app.services.command_status import CommandStatus
+from app.services.command_status import CommandStatus, is_valid_command_context
 
 from app.domain.messages import InternalMessage, ProvenanceSource, TextSegment
 from app.domain.summaries import StoredSummary, SummaryResult
@@ -96,7 +96,7 @@ class SummaryCommandHandler:
             return CommandStatus.DISABLED
         if not is_summary_command(message):
             return CommandStatus.NOT_COMMAND
-        if not self._valid_context(message):
+        if not is_valid_command_context(message):
             return CommandStatus.INVALID_CONTEXT
 
         group_id = message.context.group_id
@@ -180,17 +180,3 @@ class SummaryCommandHandler:
         finally:
             self._active_groups.discard(key)
 
-    @staticmethod
-    def _valid_context(message: InternalMessage) -> bool:
-        if message.platform != "qq_official":
-            return False
-        if message.context.sub_type != "GROUP_MESSAGE_CREATE":
-            return False
-        if not message.context.group_id:
-            return False
-        if not message.platform_message_id:
-            return False
-        timestamp = message.timestamp
-        if timestamp is None or timestamp.tzinfo is None or timestamp.utcoffset() is None:
-            return False
-        return True

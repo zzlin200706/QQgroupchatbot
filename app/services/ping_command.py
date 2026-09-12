@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Protocol
 
-from app.services.command_status import CommandStatus
+from app.services.command_status import CommandStatus, is_valid_command_context
 
 from app.domain.messages import InternalMessage, ProvenanceSource, TextSegment
 
@@ -54,7 +54,7 @@ class PingCommandHandler:
     async def handle(self, message: InternalMessage) -> CommandStatus:
         if not is_ping_command(message):
             return CommandStatus.NOT_COMMAND
-        if not self._valid_context(message):
+        if not is_valid_command_context(message):
             return CommandStatus.INVALID_CONTEXT
 
         group_id = message.context.group_id
@@ -93,14 +93,3 @@ class PingCommandHandler:
             )
             return CommandStatus.SEND_FAILED
 
-    @staticmethod
-    def _valid_context(message: InternalMessage) -> bool:
-        if message.platform != "qq_official":
-            return False
-        if message.context.sub_type != "GROUP_MESSAGE_CREATE":
-            return False
-        if not message.context.group_id:
-            return False
-        if not message.platform_message_id:
-            return False
-        return True

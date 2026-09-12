@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from enum import Enum
 
+from app.domain.messages import InternalMessage
+
 
 class CommandStatus(str, Enum):
     """Outcome of one inbound command evaluation.
@@ -34,4 +36,28 @@ class CommandStatus(str, Enum):
     SUCCEEDED = "succeeded"
 
 
-__all__ = ["CommandStatus"]
+__all__ = ["CommandStatus", "is_valid_command_context"]
+
+
+def is_valid_command_context(message: InternalMessage) -> bool:
+    """Return whether a normalized inbound event is eligible for a command.
+
+    Shared between PingCommandHandler and SummaryCommandHandler so that
+    the gate for "is this even a runnable command context" stays in one
+    place.  Summary additionally requires a tz-aware timestamp for
+    timedelta arithmetic; ping does not consume the timestamp, but the
+    strict check is harmless and keeps invariants uniform.
+    """
+    if message.platform != "qq_official":
+        return False
+    if message.context.sub_type != "GROUP_MESSAGE_CREATE":
+        return False
+    if not message.context.group_id:
+        return False
+    if not message.platform_message_id:
+        return False
+    timestamp = message.timestamp
+    if timestamp is None or timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        return False
+    return True
+
