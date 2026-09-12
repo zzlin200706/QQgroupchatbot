@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from collections.abc import Callable
@@ -96,7 +95,6 @@ class SummaryCommandHandler:
         self._cooldown_seconds = cooldown_seconds
         self._clock = clock
         self._claim_repository = claim_repository
-        self._state_lock = asyncio.Lock()
         self._active_groups: set[tuple[str, str]] = set()
         self._last_started: dict[tuple[str, str], float] = {}
 
@@ -136,9 +134,17 @@ class SummaryCommandHandler:
                 logger.info("duplicate summary command ignored")
                 return SummaryCommandStatus.DUPLICATE
         key = (message.platform, group_id)
-        claim = await self._claim(key)
-        if claim is not None:
-            return claim
+        if key in self._active_groups:
+            return SummaryCommandStatus.IN_PROGRESS
+        now = self._clock()
+        last_started = self._last_started.get(key)
+        if (
+            last_started is not None
+            and now - last_started < self._cooldown_seconds
+        ):
+            return SummaryCommandStatus.COOLDOWN
+        self._active_groups.add(key)
+        self._last_started[key] = now
 
         logger.info("summary command detected")
         try:
@@ -184,8 +190,7 @@ class SummaryCommandHandler:
                 )
                 return SummaryCommandStatus.SEND_FAILED
         finally:
-            async with self._state_lock:
-                self._active_groups.discard(key)
+            self._active_groups.discard(key)
 
     @staticmethod
     def _valid_context(message: InternalMessage) -> bool:
@@ -201,21 +206,3 @@ class SummaryCommandHandler:
         if timestamp is None or timestamp.tzinfo is None or timestamp.utcoffset() is None:
             return False
         return True
-
-    async def _claim(
-        self,
-        key: tuple[str, str],
-    ) -> SummaryCommandStatus | None:
-        async with self._state_lock:
-            if key in self._active_groups:
-                return SummaryCommandStatus.IN_PROGRESS
-            now = self._clock()
-            last_started = self._last_started.get(key)
-            if (
-                last_started is not None
-                and now - last_started < self._cooldown_seconds
-            ):
-                return SummaryCommandStatus.COOLDOWN
-            self._active_groups.add(key)
-            self._last_started[key] = now
-            return None
