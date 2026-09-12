@@ -50,14 +50,9 @@ def create_vision_provider(
 ) -> OpenAICompatibleProvider | None:
     if not settings.vision_enabled:
         return None
-    if settings.vision_provider != "openai_compatible":
-        raise LLMProviderConfigurationError(
-            f"Unsupported vision provider: {settings.vision_provider}"
-        )
-    if not settings.vision_model:
-        raise LLMProviderConfigurationError(
-            "VISION_MODEL must be configured when vision is enabled"
-        )
+    # vision_provider and vision_model are validated by Settings._validate_enabled_features
+    assert settings.vision_provider == "openai_compatible"
+    assert settings.vision_model
     if (
         isinstance(llm_provider, OpenAICompatibleProvider)
         and llm_provider.supports_vision

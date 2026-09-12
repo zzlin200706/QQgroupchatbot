@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from app.config import Settings
 from app.llm.providers import DeepSeekProvider, OpenAICompatibleProvider
@@ -112,7 +113,65 @@ def test_invalid_vision_configuration_fails_clearly(
     overrides: dict[str, str],
     message: str,
 ) -> None:
-    settings = Settings(_env_file=None, vision_enabled=True, **overrides)
+    with pytest.raises(ValidationError, match=message):
+        Settings(_env_file=None, vision_enabled=True, **overrides)
 
-    with pytest.raises(LLMProviderConfigurationError, match=message):
-        create_vision_provider(settings)
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"summary_command_enabled": True, "llm_provider": "deepseek"},
+        {
+            "summary_command_enabled": True,
+            "llm_provider": "openai_compatible",
+            "openai_compatible_api_key": "k",
+        },
+        {
+            "group_assistant_enabled": True,
+            "llm_provider": "openai_compatible",
+            "openai_compatible_base_url": "https://relay.example/v1",
+        },
+        {"summary_command_enabled": True, "llm_provider": "unknown"},
+    ],
+)
+def test_enabled_text_features_require_text_provider_credentials(
+    overrides: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **overrides)
+
+
+def test_enabled_vision_requires_credentials_and_model() -> None:
+    with pytest.raises(ValidationError, match="VISION_MODEL"):
+        Settings(
+            _env_file=None,
+            vision_enabled=True,
+            openai_compatible_api_key="k",
+            openai_compatible_base_url="https://relay.example/v1",
+        )
+
+    with pytest.raises(ValidationError, match="OPENAI_COMPATIBLE_API_KEY"):
+        Settings(
+            _env_file=None,
+            vision_enabled=True,
+            vision_model="vision-model",
+            openai_compatible_base_url="https://relay.example/v1",
+        )
+
+    with pytest.raises(ValidationError, match="OPENAI_COMPATIBLE_BASE_URL"):
+        Settings(
+            _env_file=None,
+            vision_enabled=True,
+            vision_model="vision-model",
+            openai_compatible_api_key="k",
+        )
+
+
+def test_all_features_disabled_skips_provider_validation() -> None:
+    # An unsupported llm_provider must still be loadable when nothing is
+    # enabled; the validator only runs when text or vision is actually used.
+    settings = Settings(_env_file=None, llm_provider="unknown")
+    assert settings.llm_provider == "unknown"
+
+    settings = Settings(_env_file=None, vision_enabled=False, vision_model="")
+    assert settings.vision_enabled is False

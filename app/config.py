@@ -3,7 +3,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -65,6 +65,67 @@ class Settings(BaseSettings):
 
     api_host: str = "127.0.0.1"
     api_port: int = Field(default=8000, ge=1, le=65535)
+
+    @model_validator(mode="after")
+    def _validate_enabled_features(self) -> "Settings":
+        """Fail fast when an enabled feature is missing required config.
+
+        Only validate when at least one text or vision feature is enabled,
+        so unit tests that build a Settings with everything disabled can
+        still leave the provider credentials blank.
+        """
+        text_enabled = self.summary_command_enabled or self.group_assistant_enabled
+        vision_enabled = self.vision_enabled
+        if not text_enabled and not vision_enabled:
+            return self
+
+        if self.llm_provider not in {"deepseek", "openai_compatible"}:
+            raise ValueError(
+                f"Unsupported LLM provider: {self.llm_provider!r}. "
+                "Expected 'deepseek' or 'openai_compatible'."
+            )
+
+        if text_enabled:
+            if self.llm_provider == "deepseek":
+                if not self.deepseek_api_key.get_secret_value():
+                    raise ValueError(
+                        "DEEPSEEK_API_KEY is required when "
+                        "SUMMARY_COMMAND_ENABLED or GROUP_ASSISTANT_ENABLED is true"
+                    )
+            else:  # openai_compatible
+                if not self.openai_compatible_api_key.get_secret_value():
+                    raise ValueError(
+                        "OPENAI_COMPATIBLE_API_KEY is required when "
+                        "SUMMARY_COMMAND_ENABLED or GROUP_ASSISTANT_ENABLED is true"
+                    )
+                if not self.openai_compatible_base_url:
+                    raise ValueError(
+                        "OPENAI_COMPATIBLE_BASE_URL is required when "
+                        "SUMMARY_COMMAND_ENABLED or GROUP_ASSISTANT_ENABLED is true"
+                    )
+
+        if vision_enabled:
+            if self.vision_provider != "openai_compatible":
+                raise ValueError(
+                    f"Unsupported vision provider: {self.vision_provider!r}. "
+                    "Expected 'openai_compatible'."
+                )
+            if not self.vision_model:
+                raise ValueError(
+                    "VISION_MODEL is required when VISION_ENABLED is true"
+                )
+            if not self.openai_compatible_api_key.get_secret_value():
+                raise ValueError(
+                    "OPENAI_COMPATIBLE_API_KEY is required when "
+                    "VISION_ENABLED is true"
+                )
+            if not self.openai_compatible_base_url:
+                    raise ValueError(
+                        "OPENAI_COMPATIBLE_BASE_URL is required when "
+                        "VISION_ENABLED is true"
+                    )
+
+        return self
 
     model_config = SettingsConfigDict(
         env_file=".env",
