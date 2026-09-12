@@ -87,6 +87,24 @@ class FakeSender:
         return object()
 
 
+class FakeClaimRepository:
+    def __init__(
+        self,
+        *,
+        claimed: bool = True,
+        error: Exception | None = None,
+    ) -> None:
+        self.claimed = claimed
+        self.error = error
+        self.calls: list[dict[str, str]] = []
+
+    async def claim(self, **kwargs: str) -> bool:
+        self.calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
+        return self.claimed
+
+
 @pytest.mark.parametrize("text", ["#ping", " #ping ", "\n#ping\t"])
 def test_detects_only_exact_trimmed_top_level_ping_text(text: str) -> None:
     assert is_ping_command(message(text))
@@ -148,3 +166,37 @@ async def test_send_failure_is_safe() -> None:
 
     assert status is PingCommandStatus.SEND_FAILED
     assert sender.calls == [("synthetic-group", "pong", "message-1")]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_ping_claim_prevents_second_send() -> None:
+    sender = FakeSender()
+    claims = FakeClaimRepository(claimed=False)
+    handler = PingCommandHandler(sender=sender, claim_repository=claims)
+
+    status = await handler.handle(message())
+
+    assert status is PingCommandStatus.DUPLICATE
+    assert claims.calls == [
+        {
+            "platform": "qq_official",
+            "group_id": "synthetic-group",
+            "trigger_message_id": "message-1",
+            "command_name": "ping",
+        }
+    ]
+    assert sender.calls == []
+
+
+@pytest.mark.asyncio
+async def test_ping_claim_failure_prevents_send() -> None:
+    sender = FakeSender()
+    handler = PingCommandHandler(
+        sender=sender,
+        claim_repository=FakeClaimRepository(error=RuntimeError("database down")),
+    )
+
+    status = await handler.handle(message())
+
+    assert status is PingCommandStatus.PERSISTENCE_FAILED
+    assert sender.calls == []

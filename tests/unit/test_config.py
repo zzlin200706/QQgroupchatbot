@@ -26,6 +26,11 @@ def test_phase_h_defaults_and_secret_redaction() -> None:
     assert settings.openai_compatible_model == "gpt-5.6-luna"
     assert settings.openai_compatible_timeout_seconds == 60
     assert settings.openai_compatible_max_retries == 2
+    assert settings.vision_enabled is False
+    assert settings.vision_provider == "openai_compatible"
+    assert settings.vision_model == ""
+    assert settings.image_download_timeout_seconds == 15
+    assert settings.image_max_bytes == 10485760
     assert settings.summary_max_messages == 500
     assert settings.summary_max_input_chars == 120000
     assert settings.summary_command_enabled is False
@@ -58,6 +63,8 @@ def test_phase_h_defaults_and_secret_redaction() -> None:
         {"deepseek_max_retries": -1},
         {"openai_compatible_timeout_seconds": 0},
         {"openai_compatible_max_retries": -1},
+        {"image_download_timeout_seconds": 0},
+        {"image_max_bytes": 0},
         {"summary_max_messages": 0},
         {"summary_max_input_chars": 0},
         {"summary_command_lookback_minutes": 0},

@@ -1,6 +1,6 @@
 # MESSAGE_MODEL.md
 
-文档更新时间：`2026-08-11`
+文档更新时间：`2026-08-12`
 
 ## 目标
 
@@ -178,9 +178,19 @@ class ImageSegment(Segment):
     summary: str | None
     sub_type: str | None
     file_size: int | None
+    content_type: str | None
+    width: int | None
+    height: int | None
+    description: str | None
 ```
 
-`summary` 只是平台字段位，不代表已经做过图片理解。未来 AI 对图片的解释属于 derived data，不能覆盖这里的原始事实。
+字段来源严格区分：
+
+- `file/url/file_size/content_type/width/height` 只映射 QQ attachment 明确提供的值，缺失即 `None`
+- `summary/sub_type` 保留内部模型已有的平台字段位，不凭空生成
+- `description` 是 vision provider 产生的 derived enrichment，不是 QQ 原始事实
+
+当前 parser 创建的 source `ImageSegment.description` 永远为 `None`。`ImageEnrichmentService` 只通过 `dataclasses.replace` 生成不可变运行时副本；不会覆盖 `raw_events`、原始 URL 或已存 `message_nodes`。失败时运行时副本使用中性 unavailable 描述，其余 segment 继续处理。
 
 ### FileSegment
 
@@ -318,6 +328,7 @@ class UnknownSegment(Segment):
 - 接受 top-level 或 legacy wrapper 中的 `GROUP_MESSAGE_CREATE` / `GROUP_AT_MESSAGE_CREATE` group envelope
 - `author` 直接来自 payload `author`
 - 文本、mention、图片、文件按当前 sample 和官方文档明确字段解析
+- QQ 将 `content` 与 `attachments` 分开提供时，只能证明 content segments 在前、attachment list 顺序在后；parser 不猜测不可取得的 text/image 视觉交错位置
 - 不访问网络
 - 不做 reply / forward 的远程补全
 - reply reference 与 quoted content 保真保存，不改变 inbound author/actor，也不单独触发 Assistant
@@ -344,6 +355,7 @@ messages
 - 解析 `IdentityRef` 的展示标签
 - 在 reply / forward / image / file / unknown 场景下生成安全文本
 - 为 LLM 提供有损、可控、不会泄漏 raw payload 的文本表示
+- 把 enriched image 渲染为 `[图片: ...]`，未 enriched image 保持 `[图片]`
 
 它可以：
 
@@ -356,15 +368,23 @@ messages
 - 替代 `InternalMessage`
 - 覆盖 `raw_events`
 
+## Image Enrichment Boundary
+
+```text
+stored InternalMessage / ImageSegment
+→ ImageResourceResolver
+→ ResolvedImage(bytes, content_type)
+→ VisionProvider
+→ validated ImageDescription
+→ immutable enriched InternalMessage
+→ MessageRenderer
+```
+
+下载和 provider request 都不属于 parser/domain model。当前 HTTP resolver 只接受 public HTTP(S) destination，限制 redirect、timeout、MIME 和最大 bytes；只支持腾讯文档/样本覆盖的 JPEG、PNG、GIF。Vision 描述始终标记为 AI-generated、未独立验证且不可信，不能覆盖 system instruction，也不能用于猜测 sender。
+
 ## Future Extension Rules
 
-未来允许增加：
-
-- `MediaResolver`
-- `ImageUnderstandingResult`
-- `ConversationContextService`
-- `PersonaService`
-- `MemoryService`
+未来允许增加 file/audio understanding、retrieval、persona 或 memory 等 derived service，但不得把它们伪装成平台事实。
 
 但这些都必须是 derived data，不能覆盖：
 

@@ -97,7 +97,12 @@ def _mention_input(message: InternalMessage) -> str:
             else:
                 parts.append("@" + (segment.display_name or "用户"))
         elif isinstance(segment, ImageSegment):
-            parts.append("[图片]")
+            description = segment.description or segment.summary
+            parts.append(
+                f"[图片描述（AI生成，未独立验证）: {description}]"
+                if description
+                else "[图片]"
+            )
         elif isinstance(segment, FileSegment):
             parts.append(f"[文件: {segment.name}]" if segment.name else "[文件]")
         elif isinstance(segment, ReplySegment):

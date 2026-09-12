@@ -5,6 +5,7 @@ from app.llm.providers.deepseek import DeepSeekProvider
 from app.llm.providers.factory import (
     LLMProviderConfigurationError,
     create_llm_provider,
+    create_vision_provider,
 )
 from app.llm.providers.openai_compatible import OpenAICompatibleProvider
 
@@ -14,4 +15,5 @@ __all__ = [
     "LLMProviderConfigurationError",
     "OpenAICompatibleProvider",
     "create_llm_provider",
+    "create_vision_provider",
 ]

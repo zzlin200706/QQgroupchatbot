@@ -122,9 +122,10 @@ class MessageRenderer:
                 segment.display_name or "用户",
             )
         if isinstance(segment, ImageSegment):
+            image_text = segment.description or segment.summary
             return (
-                f"[图片: {_single_line(segment.summary)}]"
-                if segment.summary
+                f"[图片: {_single_line(image_text)}]"
+                if image_text
                 else "[图片]"
             )
         if isinstance(segment, FileSegment):

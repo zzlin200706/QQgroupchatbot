@@ -10,14 +10,15 @@
 - 核心原则是 `raw-first`：先保存 raw event，再做 parser 和上层处理
 - 领域边界是 `internal model first`：LLM、renderer、repository、summary command 只依赖 `InternalMessage`
 - 默认长期部署方案是 `SQLite + ./data/ + 单进程 asyncio`，不是多服务重基础设施
-- 当前文本 AI 功能包括群聊 `#总结`、grounded `#问` 和结构化 `@bot` 对话；reply reference 已保真解析，但真实被动回复路径尚不能证明被引用者是 Bot
-- 普通群消息只入库，不触发 LLM；图片、文件、RAG、工具调用仍未实现
+- AI 功能包括群聊 `#总结`、grounded `#问`、结构化 `@bot` 对话，以及可选的图片理解
+- reply reference 保真解析；单独 reply 有意不触发 AI，只有 `#问` 或 structured `@bot` 可以触发
+- 普通群消息和普通图片只入库，不触发 LLM；文件理解、RAG 和工具调用未实现
 
 ## 当前实现
 
 - QQ Official AccessToken 获取
 - QQ Official `/gateway/bot` 接入点获取
-- Gateway HELLO / IDENTIFY / HEARTBEAT / reconnect loop
+- Gateway HELLO / IDENTIFY / RESUME / HEARTBEAT / reconnect loop
 - raw event persistence 到 `raw_events`
 - `QQOfficialMessageParser` 到 `InternalMessage`
 - `MessageRepository` / `ConversationQueryService` / `MessageRenderer`
@@ -32,6 +33,11 @@
 - reply 的 opaque reference 与 quoted content 保真解析、存储
 - 结构化 `@bot + reply` 可把平台引用正文作为不可信上下文使用，不推断 quoted author
 - 最近群消息与成功 assistant turns 的 group-scoped 多轮上下文
+- QQ JPEG / PNG / GIF attachment metadata 到 `ImageSegment` 的原样持久化
+- 有超时、大小、MIME、redirect 和 public-network 检查的图片资源解析器
+- 独立 `VisionProvider` capability 与 OpenAI-compatible data-URL multimodal request
+- summary、grounded QA 和 structured `@bot` 路径中的按需图片 enrichment
+- `assistant_trigger_claims` 与 `command_trigger_claims` 持久化幂等保护
 - inbound transport selector: `QQ_EVENT_TRANSPORT=websocket|webhook` (default `websocket`)
 - FastAPI `/health` 和应用生命周期管理
 
@@ -52,12 +58,26 @@ QQ Official WebSocket / Webhook
 ├── #总结 → SummaryService → SummaryRepository → QQOfficialGroupMessageSender
 └── #问 / structured @bot
     → ConversationQueryService
+    → optional ImageEnrichmentService
     → MessageRenderer
     → GroupAssistantService
     → configured LLMProvider
     → QQOfficialGroupMessageSender
     → AssistantInteractionRepository
 ```
+
+图片只在明确 AI interaction 需要时解析：
+
+```text
+stored ImageSegment metadata
+→ HttpImageResourceResolver
+→ VisionProvider
+→ immutable enriched message copy
+→ MessageRenderer
+→ SummaryService / GroupAssistantService
+```
+
+AI 描述是未独立验证的派生数据，不覆盖 `raw_events`、原始 URL 或数据库中的 source `ImageSegment`。
 
 当 `SUMMARY_COMMAND_ENABLED=false` 且 `GROUP_ASSISTANT_ENABLED=false` 时，runtime 仍会继续做：
 
@@ -83,12 +103,14 @@ inbound transport
 - reply 本身不是 assistant trigger；没有 `#问` 或 structured `@bot` 时只做 raw-first 入库，不 claim、不调用 LLM、不回复
 - structured `@bot + reply` 会把可取得的 quoted content 标记为 untrusted platform data；不会从正文推断被引用者身份
 - `#问` 不使用历史 Bot 回答作为事实；chat 才会把成功 Bot turn 标记为 assistant-generated context
+- 图片 URL 不在 parser 中下载；vision 关闭或单张图片失败时仍保存消息并显示中性占位
+- QQ payload 将 `content` 与 `attachments` 分开提供时，parser 保留 content segments 后接 attachment list 的可证实顺序，不猜测更细的视觉交错位置
 - 不允许把 forward tree 提前 flatten 成 `sender + text`
 - 不主动引入 `PostgreSQL`、`MySQL`、`Redis`、`Kafka`、`RabbitMQ`、`Celery`、`Elasticsearch`、独立向量数据库、`Kubernetes`、微服务
 
 ## 官方文档说明
 
-`2026-08-11` 复核的腾讯官方文档当前将 AccessToken 和 OpenAPI 统一地址写为 `https://api.bot.qq.com` 体系；仓库现有 adapter 代码与部分测试仍保留较早的 host 常量。这是一个需要单独验证和对齐的实现漂移问题，不改变本项目 `QQ Official only` 的设计方向。
+`2026-08-11` 复核的腾讯官方文档将 AccessToken 和 OpenAPI 统一地址写为 `https://api.bot.qq.com`；当前 auth、Gateway 和 group-message sender 均使用该地址。
 
 涉及 QQ Official 字段、事件体、发送接口、被动回复规则时，优先级固定为：
 
@@ -97,6 +119,71 @@ inbound transport
 3. 第三方 reference implementation
 
 Reply policy：项目有意不支持“仅回复 Bot 消息就自动触发 Assistant”。QQ reply 仍按通用消息解析、保存；只有 `#问` 或 structured `@bot` 能触发 AI。
+
+## 安装与运行
+
+要求 Python `>=3.10`：
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -e '.[dev]'
+cp .env.example .env
+.venv/bin/python -m app.main
+```
+
+`.env` 至少需要 QQ App ID/Secret。启用 summary 或 assistant 时还需要选择并配置 text provider：
+
+```dotenv
+QQ_EVENT_TRANSPORT=websocket
+SUMMARY_COMMAND_ENABLED=true
+GROUP_ASSISTANT_ENABLED=true
+LLM_PROVIDER=openai_compatible
+OPENAI_COMPATIBLE_BASE_URL=https://provider.example/v1
+OPENAI_COMPATIBLE_API_KEY=
+OPENAI_COMPATIBLE_MODEL=
+```
+
+启用图片理解时追加：
+
+```dotenv
+VISION_ENABLED=true
+VISION_PROVIDER=openai_compatible
+VISION_MODEL=
+IMAGE_DOWNLOAD_TIMEOUT_SECONDS=15
+IMAGE_MAX_BYTES=10485760
+```
+
+Vision 复用 OpenAI-compatible endpoint 和 API key。Text 可以使用 DeepSeek，同时由单独的 OpenAI-compatible provider 处理 vision；缺少可选 vision 配置时应保持 `VISION_ENABLED=false`，文本链路不受影响。
+
+## 测试
+
+```bash
+.venv/bin/python -m pytest -q
+.venv/bin/python scripts/test_image_vision.py --help
+```
+
+使用本地 JPEG / PNG / GIF 对已配置 relay 做一次人工 vision 验证：
+
+```bash
+.venv/bin/python scripts/test_image_vision.py path/to/test.png
+```
+
+脚本只输出简短描述，不输出凭证或 base64 数据。
+
+## QQ Smoke
+
+在测试群按顺序验证：
+
+1. 普通消息：入库，不回复。
+2. `#ping`：被动回复 `pong`，不调用 LLM。
+3. structured `@Bot 你好`：调用 chat 并被动回复。
+4. 单独 reply：保留 reply 数据，不回复。
+5. reply + structured `@Bot`：引用正文作为 author unavailable 的不可信上下文。
+6. `#问 ...`：只基于当前群历史回答。
+7. `#总结`：总结当前群配置窗口。
+8. image + structured `@Bot`：vision 成功时将派生描述加入 chat；失败时安全降级。
+
+真实 Webhook 和 vision smoke 尚未由自动化测试替代；默认 transport 保持已经真实验证过的 `websocket`。
 
 ## 设计文档
 

@@ -20,6 +20,7 @@ from app.services.raw_event_ingestion import QQOfficialRawEventIngestionService
 from app.services.summary import SummaryService
 from app.services.summary_command import SummaryCommandHandler, SummaryCommandStatus
 from app.storage.database import Database
+from app.storage.command_trigger_claim_repository import CommandTriggerClaimRepository
 from app.storage.message_repository import MessageRepository
 from app.storage.raw_event_repository import RawEventRepository
 from app.storage.summary_repository import SummaryRepository
@@ -106,8 +107,9 @@ async def test_ping_command_routes_group_transport_without_mutating_author(
         parser=QQOfficialMessageParser(),
     )
     sender = FakeQQOfficialSender()
+    claims = CommandTriggerClaimRepository(database.session_factory)
     dispatcher = QQOfficialCommandDispatcher(
-        ping_handler=PingCommandHandler(sender=sender)
+        ping_handler=PingCommandHandler(sender=sender, claim_repository=claims)
     )
     try:
         raw = await raw_ingestion.ingest(
@@ -123,8 +125,22 @@ async def test_ping_command_routes_group_transport_without_mutating_author(
         assert normalized is not None
 
         status = await dispatcher.handle(normalized)
+        duplicate_raw = await raw_ingestion.ingest(
+            dispatch(
+                timestamp="2026-08-11T12:00:00+08:00",
+                message_id="test-msg-id",
+                text="#ping",
+                group_openid="test-group",
+            )
+        )
+        assert duplicate_raw is not None
+        duplicate = await normalized_ingestion.ingest(duplicate_raw)
+        assert duplicate is not None
+        duplicate_status = await dispatcher.handle(duplicate)
 
         assert status is PingCommandStatus.SUCCEEDED
+        assert duplicate_status is PingCommandStatus.DUPLICATE
+        assert len(await raw_repository.list_recent()) == 2
         assert normalized.context.group_id == "test-group"
         assert normalized.author.user_id == "test-user"
         assert normalized.actor.user_id == "test-user"
@@ -150,8 +166,9 @@ async def test_summary_command_routes_current_group_only_and_replies_to_trigger_
     provider = FakeLLMProvider()
     sender = FakeQQOfficialSender()
     summary_repository = SummaryRepository(database.session_factory)
+    claims = CommandTriggerClaimRepository(database.session_factory)
     dispatcher = QQOfficialCommandDispatcher(
-        ping_handler=PingCommandHandler(sender=sender),
+        ping_handler=PingCommandHandler(sender=sender, claim_repository=claims),
         summary_handler=SummaryCommandHandler(
             summary_service=SummaryService(
                 query_service=ConversationQueryService(message_repository),
@@ -164,6 +181,7 @@ async def test_summary_command_routes_current_group_only_and_replies_to_trigger_
             enabled=True,
             lookback_minutes=120,
             cooldown_seconds=60,
+            claim_repository=claims,
         ),
     )
     try:
@@ -206,8 +224,22 @@ async def test_summary_command_routes_current_group_only_and_replies_to_trigger_
         ).astimezone(timezone.utc)
 
         status = await dispatcher.handle(command_message)
+        duplicate_raw = await raw_ingestion.ingest(
+            dispatch(
+                timestamp="2026-08-11T11:00:00+08:00",
+                message_id="command-a",
+                text=" #总结 ",
+                group_openid="group-a",
+                author_id="member-a",
+            )
+        )
+        assert duplicate_raw is not None
+        duplicate_message = await normalized_ingestion.ingest(duplicate_raw)
+        assert duplicate_message is not None
+        duplicate_status = await dispatcher.handle(duplicate_message)
 
         assert status is SummaryCommandStatus.SUCCEEDED
+        assert duplicate_status is SummaryCommandStatus.DUPLICATE
         assert command_message.author.user_id == "member-a"
         assert command_message.context.group_id == "group-a"
         assert len(provider.requests) == 1

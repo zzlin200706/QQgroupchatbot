@@ -348,6 +348,57 @@ async def test_live_qq_gateway_pipeline_commits_raw_before_normalized_message(
 
 
 @pytest.mark.asyncio
+async def test_conversation_query_collapses_duplicate_platform_message_receipts(
+    tmp_path: Path,
+) -> None:
+    database, raw_repository, message_repository = await create_storage(tmp_path)
+    raw_ingestion = QQOfficialRawEventIngestionService(raw_repository)
+    normalized_ingestion = QQOfficialNormalizedMessageIngestionService(
+        repository=message_repository,
+        parser=QQOfficialMessageParser(),
+    )
+    try:
+        first_raw = await raw_ingestion.ingest(
+            dispatch_from_sample("001_text.json", sequence=10)
+        )
+        duplicate_raw = await raw_ingestion.ingest(
+            dispatch_from_sample("001_text.json", sequence=11)
+        )
+        assert first_raw is not None and duplicate_raw is not None
+        first = await normalized_ingestion.ingest(first_raw)
+        duplicate = await normalized_ingestion.ingest(duplicate_raw)
+        assert first is not None and duplicate is not None
+        assert first.platform_message_id == duplicate.platform_message_id
+        assert first.source_raw_event_id != duplicate.source_raw_event_id
+
+        messages = await message_repository.list_conversation(
+            platform=first.platform,
+            group_id=first.context.group_id or "",
+            start_time=datetime(2026, 8, 1, tzinfo=timezone.utc),
+            end_time=datetime(2026, 9, 1, tzinfo=timezone.utc),
+            limit=20,
+        )
+        messages_before = await message_repository.list_conversation_before(
+            platform=first.platform,
+            group_id=first.context.group_id or "",
+            start_time=datetime(2026, 8, 1, tzinfo=timezone.utc),
+            trigger_time=datetime(2026, 9, 1, tzinfo=timezone.utc),
+            trigger_raw_event_id=None,
+            limit=20,
+        )
+
+        assert len(await raw_repository.list_recent()) == 2
+        assert [message.source_raw_event_id for message in messages] == [
+            duplicate_raw.id
+        ]
+        assert [message.source_raw_event_id for message in messages_before] == [
+            duplicate_raw.id
+        ]
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.asyncio
 async def test_non_group_dispatch_is_stored_but_not_normalized(tmp_path: Path) -> None:
     database, raw_repository, message_repository = await create_storage(tmp_path)
     raw_ingestion = QQOfficialRawEventIngestionService(raw_repository)

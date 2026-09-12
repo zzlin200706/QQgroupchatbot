@@ -6,7 +6,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from datetime import datetime
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -114,8 +114,30 @@ class MessageRepository:
             MessageRecord.source_raw_event_id
         ).subquery()
 
-        statement = (
-            select(MessageRecord)
+        ranked_messages = (
+            select(
+                MessageRecord.id.label("message_id"),
+                func.row_number()
+                .over(
+                    partition_by=(
+                        MessageRecord.platform,
+                        MessageRecord.group_id,
+                        MessageRecord.platform_message_id,
+                        case(
+                            (
+                                MessageRecord.platform_message_id.is_(None),
+                                MessageRecord.source_raw_event_id,
+                            ),
+                            else_=None,
+                        ),
+                    ),
+                    order_by=(
+                        MessageRecord.source_raw_event_id.desc(),
+                        MessageRecord.id.desc(),
+                    ),
+                )
+                .label("logical_rank"),
+            )
             .join(latest_per_receipt, MessageRecord.id == latest_per_receipt.c.latest_id)
             .where(
                 MessageRecord.platform == platform,
@@ -124,6 +146,15 @@ class MessageRepository:
                 MessageRecord.timestamp >= start_time,
                 MessageRecord.timestamp < end_time,
             )
+            .subquery()
+        )
+        statement = (
+            select(MessageRecord)
+            .join(
+                ranked_messages,
+                MessageRecord.id == ranked_messages.c.message_id,
+            )
+            .where(ranked_messages.c.logical_rank == 1)
             .order_by(MessageRecord.timestamp.asc(), MessageRecord.id.asc())
             .limit(limit)
         )
@@ -176,8 +207,30 @@ class MessageRepository:
                     MessageRecord.source_raw_event_id < trigger_raw_event_id,
                 ),
             )
-        statement = (
-            select(MessageRecord)
+        ranked_messages = (
+            select(
+                MessageRecord.id.label("message_id"),
+                func.row_number()
+                .over(
+                    partition_by=(
+                        MessageRecord.platform,
+                        MessageRecord.group_id,
+                        MessageRecord.platform_message_id,
+                        case(
+                            (
+                                MessageRecord.platform_message_id.is_(None),
+                                MessageRecord.source_raw_event_id,
+                            ),
+                            else_=None,
+                        ),
+                    ),
+                    order_by=(
+                        MessageRecord.source_raw_event_id.desc(),
+                        MessageRecord.id.desc(),
+                    ),
+                )
+                .label("logical_rank"),
+            )
             .join(latest_per_receipt, MessageRecord.id == latest_per_receipt.c.latest_id)
             .where(
                 MessageRecord.platform == platform,
@@ -186,6 +239,15 @@ class MessageRepository:
                 MessageRecord.timestamp >= start_time,
                 before_trigger,
             )
+            .subquery()
+        )
+        statement = (
+            select(MessageRecord)
+            .join(
+                ranked_messages,
+                MessageRecord.id == ranked_messages.c.message_id,
+            )
+            .where(ranked_messages.c.logical_rank == 1)
             .order_by(
                 MessageRecord.timestamp.desc(),
                 MessageRecord.source_raw_event_id.desc(),

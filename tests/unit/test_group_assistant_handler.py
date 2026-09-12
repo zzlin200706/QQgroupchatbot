@@ -159,7 +159,7 @@ async def test_success_sends_before_persisting_bot_turn() -> None:
     sender = FakeSender()
 
     status = await handler(service, repository, sender).handle(
-        message("#问 明天几点开会？")
+        message("#问 示例任务何时结束？")
     )
 
     assert status is GroupAssistantStatus.SUCCEEDED

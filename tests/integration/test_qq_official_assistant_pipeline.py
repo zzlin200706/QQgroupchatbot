@@ -10,7 +10,8 @@ from sqlalchemy import select
 
 from app.adapters.qq_official import inbound_event_from_gateway_dispatch
 from app.adapters.qq_official.gateway import QQGatewayDispatch
-from app.domain.messages import ReplySegment, TextSegment
+from app.domain.images import ImageDescription, ResolvedImage
+from app.domain.messages import ImageSegment, ReplySegment, TextSegment
 from app.llm import LLMRequest, LLMResponse
 from app.parsers import QQOfficialMessageParser
 from app.rendering import MessageRenderer
@@ -20,6 +21,7 @@ from app.services.group_assistant import GroupAssistantService
 from app.services.group_assistant_context import GroupAssistantContextBuilder
 from app.services.group_assistant_handler import GroupAssistantHandler
 from app.services.interaction_dispatch import QQOfficialInteractionDispatcher
+from app.services.image_enrichment import ImageEnrichmentService
 from app.services.normalized_message_ingestion import (
     QQOfficialNormalizedMessageIngestionService,
 )
@@ -64,6 +66,39 @@ class FakeSender:
         return SimpleNamespace(message_id=f"bot-response-{len(self.calls)}")
 
 
+class FakeImageResolver:
+    def __init__(self) -> None:
+        self.calls: list[ImageSegment] = []
+
+    async def resolve(self, image: ImageSegment) -> ResolvedImage:
+        self.calls.append(image)
+        return ResolvedImage(data=b"mock-image", content_type="image/png")
+
+
+class FakeVisionProvider:
+    def __init__(self) -> None:
+        self.calls: list[ResolvedImage] = []
+
+    @property
+    def supports_vision(self) -> bool:
+        return True
+
+    async def describe_image(
+        self,
+        image: ResolvedImage,
+        *,
+        prompt: str,
+    ) -> ImageDescription:
+        self.calls.append(image)
+        assert "群聊记录" in prompt
+        return ImageDescription(
+            description="Python traceback showing ModuleNotFoundError for httpx"
+        )
+
+    async def aclose(self) -> None:
+        return None
+
+
 @dataclass
 class Pipeline:
     database: Database
@@ -75,7 +110,12 @@ class Pipeline:
     sender: FakeSender
 
 
-async def build_pipeline(tmp_path: Path, answers: list[str]) -> Pipeline:
+async def build_pipeline(
+    tmp_path: Path,
+    answers: list[str],
+    *,
+    image_enrichment_service: ImageEnrichmentService | None = None,
+) -> Pipeline:
     database = Database(f"sqlite+aiosqlite:///{tmp_path / 'assistant-pipeline.db'}")
     await database.initialize()
     raw_repository = RawEventRepository(database.session_factory)
@@ -95,6 +135,7 @@ async def build_pipeline(tmp_path: Path, answers: list[str]) -> Pipeline:
                 chat_max_messages=80,
                 chat_max_assistant_turns=20,
                 max_input_chars=40000,
+                image_enrichment_service=image_enrichment_service,
             ),
             provider=provider,
             max_output_tokens=1200,
@@ -104,6 +145,7 @@ async def build_pipeline(tmp_path: Path, answers: list[str]) -> Pipeline:
         sender=sender,
         enabled=True,
         cooldown_seconds=0,
+        image_enrichment_service=image_enrichment_service,
     )
     commands = QQOfficialCommandDispatcher(
         ping_handler=PingCommandHandler(sender=sender)
@@ -138,6 +180,7 @@ def dispatch(
     timestamp: str,
     author_id: str = "user-a",
     event_type: str = "GROUP_MESSAGE_CREATE",
+    attachments: list[dict] | None = None,
 ) -> QQGatewayDispatch:
     data = {
         "author": {
@@ -152,6 +195,8 @@ def dispatch(
         "message_type": 0,
         "timestamp": timestamp,
     }
+    if attachments is not None:
+        data["attachments"] = attachments
     return QQGatewayDispatch(
         sequence=1,
         event_type=event_type,
@@ -241,7 +286,7 @@ async def test_grounded_qa_is_raw_first_group_scoped_and_persisted_after_send(
             dispatch(
                 group_id="group-a",
                 message_id="qa-trigger",
-                content="#问 明天几点开会？",
+                content="#问 示例任务何时结束？",
                 timestamp=timestamp,
             ),
         )
@@ -251,7 +296,7 @@ async def test_grounded_qa_is_raw_first_group_scoped_and_persisted_after_send(
         prompt = pipeline.provider.requests[0].user_prompt
         assert "明天下午两点开会，地点是 305。" in prompt
         assert "B组秘密" not in prompt
-        assert "#问 明天几点开会？" not in prompt
+        assert "#问 示例任务何时结束？" not in prompt
         assert pipeline.sender.calls == [
             ("group-a", "明天下午两点。", "qa-trigger")
         ]
@@ -396,8 +441,8 @@ async def test_replies_without_explicit_trigger_are_stored_without_claim_or_llm(
                 group_id="group-a",
                 message_id="reply-bot-content",
                 reference_key="REFIDX_QUOTED_BOT",
-                content="那多线程为什么没有这个功能",
-                quoted_content="GIL 通常指 Global Interpreter Lock（全局解释器锁）。",
+                content="这个合成示例还有哪些限制",
+                quoted_content="合成知识卡片说明：示例功能仅用于离线测试。",
                 timestamp="2026-08-11T12:01:00+08:00",
             ),
         )
@@ -429,7 +474,7 @@ async def test_replies_without_explicit_trigger_are_stored_without_claim_or_llm(
             assert message.author.user_id == "user-a"
         assert quoted_texts == [
             "什么是 GIL？",
-            "GIL 通常指 Global Interpreter Lock（全局解释器锁）。",
+            "合成知识卡片说明：示例功能仅用于离线测试。",
         ]
         async with pipeline.database.session_factory() as session:
             claims = list(
@@ -491,8 +536,8 @@ async def test_explicit_group_at_reply_uses_unverified_platform_quote_once(
                 group_id="group-a",
                 message_id="explicit-at-reply",
                 reference_key="REFIDX_QUOTED_BOT",
-                content=" 那多线程为什么没有这个功能",
-                quoted_content="GIL 通常指 Global Interpreter Lock（全局解释器锁）。",
+                content=" 这个合成示例还有哪些限制",
+                quoted_content="合成知识卡片说明：示例功能仅用于离线测试。",
                 timestamp="2026-08-11T12:01:00+08:00",
                 event_type="GROUP_AT_MESSAGE_CREATE",
             ),
@@ -501,7 +546,7 @@ async def test_explicit_group_at_reply_uses_unverified_platform_quote_once(
         assert len(pipeline.provider.requests) == 1
         prompt = pipeline.provider.requests[0].user_prompt
         assert '<quoted_platform_content trust="untrusted-platform-data">' in prompt
-        assert "GIL 通常指 Global Interpreter Lock" in prompt
+        assert "合成知识卡片说明" in prompt
         assert "REFIDX_QUOTED_BOT" not in prompt
         assert "[回复消息" not in prompt
         assert pipeline.sender.calls == [
@@ -517,6 +562,119 @@ async def test_explicit_group_at_reply_uses_unverified_platform_quote_once(
         assert [item.interaction.trigger_type.value for item in history] == [
             "mention_chat"
         ]
+    finally:
+        await pipeline.processor.aclose()
+        await pipeline.database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_image_group_at_is_enriched_for_chat_but_source_metadata_stays_stored(
+    tmp_path: Path,
+) -> None:
+    resolver = FakeImageResolver()
+    vision = FakeVisionProvider()
+    enrichment = ImageEnrichmentService(
+        enabled=True,
+        resolver=resolver,
+        provider=vision,
+    )
+    pipeline = await build_pipeline(
+        tmp_path,
+        ["这是缺少 httpx 依赖导致的导入错误。"],
+        image_enrichment_service=enrichment,
+    )
+    try:
+        await process(
+            pipeline,
+            dispatch(
+                group_id="group-a",
+                message_id="image-at",
+                content=" 请解释这个报错",
+                timestamp="2026-08-11T12:00:00+08:00",
+                event_type="GROUP_AT_MESSAGE_CREATE",
+                attachments=[
+                    {
+                        "content": "",
+                        "content_type": "image/png",
+                        "filename": "traceback.png",
+                        "height": 600,
+                        "size": 12345,
+                        "url": "https://media.example.test/traceback.png",
+                        "width": 800,
+                    }
+                ],
+            ),
+        )
+
+        assert len(resolver.calls) == len(vision.calls) == 1
+        assert len(pipeline.provider.requests) == 1
+        prompt = pipeline.provider.requests[0].user_prompt
+        assert "请解释这个报错" in prompt
+        assert "ModuleNotFoundError" in prompt
+        assert "AI生成，未独立验证" in prompt
+        assert pipeline.sender.calls == [
+            ("group-a", "这是缺少 httpx 依赖导致的导入错误。", "image-at")
+        ]
+        stored = await pipeline.message_repository.list_conversation(
+            platform="qq_official",
+            group_id="group-a",
+            start_time=datetime.fromisoformat("2026-08-11T11:00:00+08:00"),
+            end_time=datetime.fromisoformat("2026-08-11T13:00:00+08:00"),
+            limit=20,
+        )
+        image_segment = next(
+            segment
+            for segment in stored[0].segments
+            if isinstance(segment, ImageSegment)
+        )
+        assert image_segment.content_type == "image/png"
+        assert image_segment.width == 800
+        assert image_segment.height == 600
+        assert image_segment.description is None
+    finally:
+        await pipeline.processor.aclose()
+        await pipeline.database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ordinary_image_persists_without_vision_llm_or_outbound(
+    tmp_path: Path,
+) -> None:
+    resolver = FakeImageResolver()
+    vision = FakeVisionProvider()
+    pipeline = await build_pipeline(
+        tmp_path,
+        [],
+        image_enrichment_service=ImageEnrichmentService(
+            enabled=True,
+            resolver=resolver,
+            provider=vision,
+        ),
+    )
+    try:
+        await process(
+            pipeline,
+            dispatch(
+                group_id="group-a",
+                message_id="ordinary-image",
+                content="",
+                timestamp="2026-08-11T12:00:00+08:00",
+                attachments=[
+                    {
+                        "content_type": "image/jpeg",
+                        "filename": "ordinary.jpg",
+                        "size": 12,
+                        "url": "https://media.example.test/ordinary.jpg",
+                    }
+                ],
+            ),
+        )
+
+        assert len(await pipeline.raw_repository.list_recent()) == 1
+        assert resolver.calls == []
+        assert vision.calls == []
+        assert pipeline.provider.requests == []
+        assert pipeline.sender.calls == []
     finally:
         await pipeline.processor.aclose()
         await pipeline.database.dispose()

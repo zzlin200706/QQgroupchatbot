@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 class PingCommandStatus(str, Enum):
     NOT_COMMAND = "not_command"
     INVALID_CONTEXT = "invalid_context"
+    DUPLICATE = "duplicate"
+    PERSISTENCE_FAILED = "persistence_failed"
     SEND_FAILED = "send_failed"
     SUCCEEDED = "succeeded"
 
@@ -27,6 +29,10 @@ class _GroupMessageSender(Protocol):
         *,
         msg_id: str | None = None,
     ) -> object: ...
+
+
+class _CommandClaimStore(Protocol):
+    async def claim(self, **kwargs: str) -> bool: ...
 
 
 def is_ping_command(message: InternalMessage) -> bool:
@@ -44,8 +50,14 @@ def is_ping_command(message: InternalMessage) -> bool:
 class PingCommandHandler:
     """Send one passive ``pong`` reply for the exact ``#ping`` command."""
 
-    def __init__(self, *, sender: _GroupMessageSender) -> None:
+    def __init__(
+        self,
+        *,
+        sender: _GroupMessageSender,
+        claim_repository: _CommandClaimStore | None = None,
+    ) -> None:
         self._sender = sender
+        self._claim_repository = claim_repository
 
     async def handle(self, message: InternalMessage) -> PingCommandStatus:
         if not is_ping_command(message):
@@ -54,12 +66,31 @@ class PingCommandHandler:
             return PingCommandStatus.INVALID_CONTEXT
 
         group_id = message.context.group_id
+        message_id = message.platform_message_id
         assert group_id is not None
+        assert message_id is not None
+        if self._claim_repository is not None:
+            try:
+                claimed = await self._claim_repository.claim(
+                    platform=message.platform,
+                    group_id=group_id,
+                    trigger_message_id=message_id,
+                    command_name="ping",
+                )
+            except Exception as error:
+                logger.warning(
+                    "ping command claim failed error_type=%s",
+                    type(error).__name__,
+                )
+                return PingCommandStatus.PERSISTENCE_FAILED
+            if not claimed:
+                logger.info("duplicate ping command ignored")
+                return PingCommandStatus.DUPLICATE
         try:
             await self._sender.send_group_message(
                 group_id,
                 "pong",
-                msg_id=message.platform_message_id,
+                msg_id=message_id,
             )
             logger.info("ping command send succeeded")
             return PingCommandStatus.SUCCEEDED

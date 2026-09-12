@@ -10,6 +10,7 @@ from app.domain.messages import (
     IdentityRef,
     IdentitySource,
     InternalMessage,
+    ImageSegment,
     MessageContext,
     MessageProvenance,
     ProvenanceSource,
@@ -55,8 +56,21 @@ def test_codec_explicitly_encodes_relations_kinds_depth_and_enum_values() -> Non
         author=identity(),
         timestamp=datetime(2026, 8, 10, 12, tzinfo=timezone.utc),
         segments=(
-            ReplySegment(
+            ImageSegment(
                 position=0,
+                raw_data={"source": "qq"},
+                file="screen.png",
+                url="https://media.example/image",
+                summary=None,
+                sub_type=None,
+                file_size=123,
+                content_type="image/png",
+                width=640,
+                height=480,
+                description="terminal screenshot",
+            ),
+            ReplySegment(
+                position=1,
                 raw_data={"ref_msg_idx": "REFIDX_1"},
                 referenced_message_id=None,
                 reference_key="REFIDX_1",
@@ -71,7 +85,7 @@ def test_codec_explicitly_encodes_relations_kinds_depth_and_enum_values() -> Non
                 resolved_raw_data={"resolved": True},
             ),
             ForwardSegment(
-                position=1,
+                position=2,
                 raw_data={"forward": True},
                 reference_id="forward-1",
                 resolved=True,
@@ -112,16 +126,22 @@ def test_codec_explicitly_encodes_relations_kinds_depth_and_enum_values() -> Non
     assert record.actor_availability == "known"
     assert record.provenance_source == "direct_event"
     assert [(node.node_kind, node.relation, node.position, node.depth) for node in record.nodes] == [
-        ("reply", "segments", 0, 0),
+        ("image", "segments", 0, 0),
+        ("reply", "segments", 1, 0),
         ("resolved_message", "resolved_message", 0, 1),
         ("text", "segments", 0, 2),
-        ("forward", "segments", 1, 0),
+        ("forward", "segments", 2, 0),
         ("text", "content", 0, 1),
         ("forward_node", "nodes", 0, 1),
         ("text", "content", 0, 2),
     ]
-    reply_record = record.nodes[0]
-    forward_record = record.nodes[3]
+    image_record = record.nodes[0]
+    reply_record = record.nodes[1]
+    forward_record = record.nodes[4]
+    assert image_record.payload_json["content_type"] == "image/png"
+    assert image_record.payload_json["width"] == 640
+    assert image_record.payload_json["height"] == 480
+    assert image_record.payload_json["description"] == "terminal screenshot"
     assert reply_record.payload_json["resolution_status"] == "resolved"
     assert reply_record.payload_json["reference_key"] == "REFIDX_1"
     assert forward_record.payload_json["resolution_status"] == "embedded"

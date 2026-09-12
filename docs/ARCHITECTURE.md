@@ -1,6 +1,6 @@
 # ARCHITECTURE.md
 
-文档更新时间：`2026-08-11`
+文档更新时间：`2026-08-12`
 
 ## 项目定位
 
@@ -53,6 +53,8 @@ GroupAssistantContextBuilder
         ↓
 ConversationQueryService + AssistantInteractionRepository
         ↓
+optional ImageEnrichmentService
+        ↓
 MessageRenderer
         ↓
 shared LLMProvider
@@ -62,9 +64,20 @@ QQOfficialGroupMessageSender
 successful assistant_interactions persistence
 ```
 
+图片 enrichment 共用以下边界：
+
+```text
+persisted ImageSegment metadata
+→ HttpImageResourceResolver
+→ VisionProvider
+→ immutable enriched InternalMessage copy
+→ MessageRenderer
+→ SummaryService / GroupAssistantService
+```
+
 其中：
 
-- `raw_events`、`messages`、`message_nodes`、`summaries`、`assistant_interactions` 和 assistant trigger claims 都在同一个 SQLite 中
+- `raw_events`、`messages`、`message_nodes`、`summaries`、`assistant_interactions`、assistant claims 和 command claims 都在同一个 SQLite 中
 - `FastAPI` 当前提供 `/health`、应用生命周期托管和 QQ Official webhook endpoint
 - `SUMMARY_COMMAND_ENABLED=false` 时，不启动 summary handler，但 raw/normalized persistence 仍正常工作
 - `GROUP_ASSISTANT_ENABLED=false` 时，`#问` / `@bot` 不触发 LLM，但入站消息仍照常持久化
@@ -77,7 +90,7 @@ successful assistant_interactions persistence
 ### `app/adapters/qq_official/`
 
 - `auth.py`：AccessToken 获取
-- `gateway.py`：`/gateway/bot`、HELLO / IDENTIFY / HEARTBEAT、dispatch、reconnect state
+- `gateway.py`：`/gateway/bot`、HELLO / IDENTIFY / RESUME / HEARTBEAT、dispatch、reconnect state
 - `inbound.py`：transport-neutral inbound event model
 - `message_api.py`：群消息发送
 - `redaction.py`：本地 sample 与日志安全脱敏
@@ -91,12 +104,17 @@ successful assistant_interactions persistence
 
 - 严格的内部消息模型、身份模型、provenance 与 segment 树
 
+### `app/domain/images/`
+
+- provider-neutral `ResolvedImage` 与 validated `ImageDescription`
+
 ### `app/storage/`
 
 - `raw_event_repository.py`
 - `message_repository.py`
 - `summary_repository.py`
 - `assistant_interaction_repository.py`
+- `command_trigger_claim_repository.py`
 - `message_codec.py` / `summary_codec.py`
 
 ### `app/services/`
@@ -111,6 +129,8 @@ successful assistant_interactions persistence
 - `GroupAssistantContextBuilder`
 - `GroupAssistantService`
 - `GroupAssistantHandler`
+- `HttpImageResourceResolver`
+- `ImageEnrichmentService`
 
 ### `app/rendering/`
 
@@ -123,12 +143,14 @@ successful assistant_interactions persistence
 - `LLMProvider` 协议
 - `DeepSeekProvider`
 - `OpenAICompatibleProvider`
+- 独立 `VisionProvider` capability；不要求 text-only provider 伪装支持图片
 
 ## 当前组件边界
 
 ### Gateway Client
 
-- 负责获取接入点、建立 WebSocket、处理 HELLO / IDENTIFY / HEARTBEAT、收 dispatch、重连。
+- 负责获取接入点、建立 WebSocket、处理 HELLO / IDENTIFY / RESUME / HEARTBEAT、收 dispatch、重连。
+- 同一进程内保留 `session_id + last sequence`；会话不可恢复时清空并回退 IDENTIFY，不在磁盘伪造 Gateway session。
 - 不做 parser。
 - 不做数据库业务。
 - 不做 summary 或 LLM 调用。
@@ -181,6 +203,7 @@ successful assistant_interactions persistence
 - `message_type == 103`：保留 opaque `msg_elements` / `message_scene`，并把一致、格式有效的 target `REFIDX` 保存为 `ReplySegment.reference_key`
 - mention 只有在 `content` token 与 `mentions[]` 明确对应时才生成 `AtSegment`
 - mention 的 `is_self` 只来自明确布尔 `mentions[].is_you`；`GROUP_AT_MESSAGE_CREATE` 由官方事件类型确认 Bot mention
+- image attachment 只映射官方/真实 sample 提供的 filename、URL、MIME、size、width、height；parser 不下载图片
 - 未确认结构一律保留为 `UnknownSegment`
 
 parser 不访问 SQLite，也不解析 quoted author。当前 runtime 不做 reply target lookup；未来如果需要 reply / forward 网络补全，仍应通过概念接口实现：
@@ -203,11 +226,15 @@ class MessageReferenceResolver:
 - `summaries` 只保存 validated summary result 与最小必要元数据
 - `assistant_interactions` 只保存已经成功发送给 QQ 的 Bot turn，包括可选 `response_message_id`；outbound 不伪造成 raw event 或 `InternalMessage`
 - `assistant_trigger_claims` 对 `(platform, group_id, trigger_message_id, trigger_type)` 做轻量持久化去重
+- `command_trigger_claims` 对 `#ping/#总结` 做同样的持久化幂等保护；重复 receipt 仍保留在 raw storage 供诊断
+- conversation query 以 `(platform, group_id, platform_message_id)` 折叠稳定 ID 的重复 receipt，只暴露最新 normalized representation；缺失 message ID 的记录不做猜测式去重
+- 原始 image metadata 保存于 `message_nodes.payload_json`；运行时 AI description 不覆盖 source row
 - 不保存 prompt、完整 conversation、provider body 或 secret
 
 ### Rendering
 
 - `MessageRenderer` 负责把严格的 `InternalMessage[]` 渲染成给 LLM 的有损文本
+- 已分析图片渲染为 `[图片: 派生描述]`，未分析图片保持 `[图片]`
 - renderer 可以为 presentation 做有损折叠
 - renderer 不能反过来成为事实源头
 
@@ -217,6 +244,7 @@ class MessageReferenceResolver:
 
 ```text
 ConversationQueryService
+ImageEnrichmentService (optional)
 MessageRenderer
 LLMProvider
 ```
@@ -240,6 +268,7 @@ generate
 
 - `#问` 只使用同 platform、同 group、当前 trigger 之前的 `InternalMessage`；历史 Bot 回答不进入 grounded evidence
 - `@bot` 使用最近群消息和同群成功 `assistant_interactions`，按 trigger timestamp 合并为 role-aware timeline
+- vision 开启时，历史图片与当前 structured `@bot` 图片在 rendering 前按需 enrichment；普通图片不触发下载或 LLM
 - trigger 优先级是 `#ping → #总结 → #问 → structured @bot → ordinary`
 - reply 本身永远不是 assistant trigger；没有 `#问` 或 structured `@bot` 时只入库，不 claim、不调用 LLM
 - structured `@bot + reply` 使用 parser 已保留的 quoted content，并以 `untrusted-platform-data` block 进入 Chat
@@ -267,6 +296,17 @@ validated domain result / AssistantResult
 
 `DeepSeekProvider` 和 `OpenAICompatibleProvider` 都由配置选择；summary 与 assistant 共享同一个 provider 实例和生命周期。
 
+Vision 使用独立 capability：
+
+```text
+ImageEnrichmentService
+→ VisionProvider.describe_image(ResolvedImage)
+→ OpenAICompatibleProvider
+→ validated ImageDescription
+```
+
+OpenAI-compatible provider 在内部把已下载 bytes 编码为 data URL；QQ URL、base64 和 provider payload 不泄漏到业务 service 或日志。Text provider 为 OpenAI-compatible 时复用同一实例，否则允许 DeepSeek text + OpenAI-compatible vision 两个受控实例。
+
 禁止：
 
 ```python
@@ -275,7 +315,7 @@ prompt = str(raw_gateway_payload)
 
 也禁止让业务 Service 直接面向某个具体平台品牌。
 
-## 未来目标架构
+## 完整运行架构
 
 在保持单机轻量部署前提下，后续 phase 的目标架构统一按下面的概念边界扩展：
 
@@ -320,6 +360,8 @@ InternalMessage[]
         ↓
 GroupAssistantContextBuilder
         ↓
+ImageEnrichmentService (optional)
+        ↓
 MessageRenderer
         ↓
 LLMProvider
@@ -328,12 +370,6 @@ LLMProvider
         ↓
 validated domain result
 ```
-
-其中以下组件仍是 `future`：
-
-- `MediaResolver`
-- `MultimodalPolicy`
-- `MultimodalContentBuilder`
 
 ## 触发策略
 
@@ -364,6 +400,7 @@ message_nodes
 summaries
 assistant_trigger_claims
 assistant_interactions
+command_trigger_claims
 ```
 
 这是当前有效实现，不要求为了“更规范”继续拆成更多子表。
@@ -375,16 +412,7 @@ SQLite
 + local filesystem
 ```
 
-对于未来图片/媒体能力，推荐保留：
-
-```text
-data/
-├── qqgroupchatbot.db
-└── media/
-    └── ...
-```
-
-SQLite 保存 metadata、relative path、sha256、download status、derived description reference；不要默认把大图片作为 SQLite BLOB 保存。
+图片 bytes 不写 SQLite，也不默认建立本地媒体缓存。数据库只保存 QQ 提供的 metadata/URL；解析发生在明确 AI interaction 的有界内存路径中。
 
 ## FastAPI 定位
 
@@ -398,7 +426,7 @@ admin
 manual API
 ```
 
-当前已实现 `/health`。未来可以增加 message history、summaries、manual replay，但不需要为了“标准后台”建立大量 CRUD。
+当前已实现 `/health` 和 `/qq-official/webhook`。后者仅在 `QQ_EVENT_TRANSPORT=webhook` 时启用；无需为了“标准后台”建立大量 CRUD。
 
 ## 推荐目录方向
 
@@ -410,6 +438,7 @@ app/
 │   └── qq_official/
 ├── domain/
 │   ├── messages/
+│   ├── images/
 │   ├── summaries/
 │   └── assistant_interactions/
 ├── parsers/
@@ -423,15 +452,13 @@ app/
 │   ├── group_assistant_context.py
 │   ├── group_assistant.py
 │   ├── group_assistant_handler.py
-│   └── media.py                     # future
+│   ├── image_resources.py
+│   └── image_enrichment.py
 ├── llm/
 │   ├── models.py
 │   └── providers/
 │       ├── base.py
 │       ├── deepseek.py
 │       └── openai_compatible.py
-└── bot_actions/
-    └── qq_official/                 # future abstraction
+└── main.py                          # composition root
 ```
-
-标注为 `future` 的文件不代表当前应立即创建。

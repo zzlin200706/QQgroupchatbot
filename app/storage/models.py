@@ -253,6 +253,28 @@ class AssistantTriggerClaimRecord(Base):
     claimed_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 
+class CommandTriggerClaimRecord(Base):
+    """One durable idempotency claim for an explicit QQ command message."""
+
+    __tablename__ = "command_trigger_claims"
+    __table_args__ = (
+        UniqueConstraint(
+            "platform",
+            "group_id",
+            "trigger_message_id",
+            "command_name",
+            name="uq_command_trigger_claim",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    platform: Mapped[str] = mapped_column(String(32), nullable=False)
+    group_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    trigger_message_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    command_name: Mapped[str] = mapped_column(String(32), nullable=False)
+    claimed_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
 class AssistantInteractionRecord(Base):
     """One assistant answer that was successfully delivered to QQ."""
 

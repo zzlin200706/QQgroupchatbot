@@ -28,6 +28,7 @@ from app.services.group_assistant_trigger import (
     GroupAssistantTrigger,
     detect_group_assistant_trigger,
 )
+from app.services.image_enrichment import ImageEnrichmentService
 from app.storage.assistant_interaction_repository import AssistantInteractionRepository
 
 
@@ -76,6 +77,7 @@ class GroupAssistantHandler:
         sender: _GroupMessageSender,
         enabled: bool,
         cooldown_seconds: int,
+        image_enrichment_service: ImageEnrichmentService | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if cooldown_seconds < 0:
@@ -86,6 +88,7 @@ class GroupAssistantHandler:
         self._enabled = enabled
         self._cooldown_seconds = cooldown_seconds
         self._clock = clock
+        self._image_enrichment_service = image_enrichment_service
         self._state_lock = asyncio.Lock()
         self._last_started: dict[tuple[str, str, str], float] = {}
 
@@ -98,12 +101,6 @@ class GroupAssistantHandler:
         if not self._enabled:
             return GroupAssistantStatus.DISABLED
         trigger = detect_group_assistant_trigger(message)
-        unverified_platform_quote = (
-            _quoted_platform_content(message)
-            if trigger is not None
-            and trigger.trigger_type is AssistantTriggerType.MENTION_CHAT
-            else None
-        )
         if trigger is None:
             return GroupAssistantStatus.NOT_TRIGGER
         if not self._valid_context(message):
@@ -152,10 +149,27 @@ class GroupAssistantHandler:
             return GroupAssistantStatus.COOLDOWN
 
         try:
+            generation_message = message
+            generation_input = trigger.user_input
+            if (
+                trigger.trigger_type is AssistantTriggerType.MENTION_CHAT
+                and self._image_enrichment_service is not None
+            ):
+                generation_message = (
+                    await self._image_enrichment_service.enrich_messages((message,))
+                )[0]
+                enriched_trigger = detect_group_assistant_trigger(generation_message)
+                if enriched_trigger is not None:
+                    generation_input = enriched_trigger.user_input
+            unverified_platform_quote = (
+                _quoted_platform_content(generation_message)
+                if trigger.trigger_type is AssistantTriggerType.MENTION_CHAT
+                else None
+            )
             result = await self._service.answer(
                 mode=trigger.mode,
-                message=message,
-                user_input=trigger.user_input,
+                message=generation_message,
+                user_input=generation_input,
                 quoted_platform_content=unverified_platform_quote,
             )
         except Exception as error:
@@ -294,7 +308,12 @@ def _quoted_platform_content(message: InternalMessage) -> str | None:
         elif isinstance(segment, AtSegment):
             parts.append("@" + (segment.display_name or "用户"))
         elif isinstance(segment, ImageSegment):
-            parts.append("[图片]")
+            description = segment.description or segment.summary
+            parts.append(
+                f"[图片描述（AI生成，未独立验证）: {description}]"
+                if description
+                else "[图片]"
+            )
         elif isinstance(segment, FileSegment):
             parts.append(f"[文件: {segment.name}]" if segment.name else "[文件]")
         elif isinstance(segment, ForwardSegment):

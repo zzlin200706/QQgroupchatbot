@@ -120,7 +120,7 @@ def test_captured_group_message_bot_mention_is_detected_and_removed() -> None:
 
     assert trigger is not None
     assert trigger.trigger_type is AssistantTriggerType.MENTION_CHAT
-    assert trigger.user_input == "phase-d-at-bot-002"
+    assert trigger.user_input == "synthetic-at-bot-002"
 
 
 def test_other_member_mention_is_preserved_but_does_not_trigger_alone() -> None:

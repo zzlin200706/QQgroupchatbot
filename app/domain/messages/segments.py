@@ -38,6 +38,10 @@ class ImageSegment(Segment):
     summary: str | None
     sub_type: str | None
     file_size: int | None
+    content_type: str | None = None
+    width: int | None = None
+    height: int | None = None
+    description: str | None = None
 
 
 class ReplyResolutionStatus(str, Enum):

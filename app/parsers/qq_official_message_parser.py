@@ -295,6 +295,10 @@ class QQOfficialMessageParser:
                         summary=None,
                         sub_type=None,
                         file_size=_as_int(attachment.get("size")),
+                        content_type=content_type,
+                        width=_as_int(attachment.get("width")),
+                        height=_as_int(attachment.get("height")),
+                        description=None,
                         raw_data=raw_attachment,
                     )
                 )

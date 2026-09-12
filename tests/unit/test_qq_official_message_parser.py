@@ -48,7 +48,7 @@ def test_parse_real_text_sample() -> None:
     assert message.author.user_id == message.actor.user_id
     assert message.timestamp is not None
     assert message.segments == (
-        TextSegment(position=0, text="phase-d-test-001", raw_data="phase-d-test-001"),
+        TextSegment(position=0, text="synthetic-text-001", raw_data="synthetic-text-001"),
     )
 
 
@@ -103,6 +103,10 @@ def test_parse_real_image_sample() -> None:
     assert image.file == event["data"]["attachments"][0]["filename"]
     assert image.url == event["data"]["attachments"][0]["url"]
     assert image.file_size == event["data"]["attachments"][0]["size"]
+    assert image.content_type == "image/jpeg"
+    assert image.width == event["data"]["attachments"][0]["width"]
+    assert image.height == event["data"]["attachments"][0]["height"]
+    assert image.description is None
     assert image.raw_data == event["data"]["attachments"][0]
 
 
@@ -118,6 +122,46 @@ def test_captured_text_and_image_keep_field_order_and_attachment_payload() -> No
     assert image.url == event["data"]["attachments"][0]["url"]
     assert image.file_size == event["data"]["attachments"][0]["size"]
     assert image.raw_data == event["data"]["attachments"][0]
+
+
+def test_text_mention_and_multiple_images_keep_supported_source_order() -> None:
+    event = copy.deepcopy(sample("002_at_bot.json"))
+    first = copy.deepcopy(sample("004_image.json")["data"]["attachments"][0])
+    second = copy.deepcopy(sample("006_text_image.json")["data"]["attachments"][0])
+    event["data"]["attachments"] = [first, second]
+
+    message = QQOfficialMessageParser().parse(event)
+
+    assert message is not None
+    assert [type(segment) for segment in message.segments] == [
+        AtSegment,
+        TextSegment,
+        ImageSegment,
+        ImageSegment,
+    ]
+    assert [segment.position for segment in message.segments] == [0, 1, 2, 3]
+    assert message.segments[2].raw_data == first
+    assert message.segments[3].raw_data == second
+
+
+def test_image_missing_optional_metadata_remains_none_without_fabrication() -> None:
+    event = copy.deepcopy(sample("004_image.json"))
+    attachment = event["data"]["attachments"][0]
+    for field in ("filename", "height", "size", "url", "width"):
+        attachment.pop(field)
+
+    message = QQOfficialMessageParser().parse(event)
+
+    assert message is not None
+    image = message.segments[0]
+    assert isinstance(image, ImageSegment)
+    assert image.file is None
+    assert image.url is None
+    assert image.file_size is None
+    assert image.width is None
+    assert image.height is None
+    assert image.content_type == "image/jpeg"
+    assert image.raw_data == attachment
 
 
 def test_captured_file_does_not_invent_file_id_or_path() -> None:
@@ -168,7 +212,7 @@ def test_real_reply_ref_idx_stays_out_of_platform_message_id_namespace() -> None
     reply = message.segments[0]
     assert isinstance(reply, ReplySegment)
     assert reply.referenced_message_id is None
-    assert reply.reference_key == "REFIDX_r57sIZqkOaRAu4hcqJneWQ=="
+    assert reply.reference_key == "REFIDX_fixture_quote=="
     assert event["data"]["msg_elements"][0]["msg_idx"] != event["data"]["id"]
 
 
@@ -195,12 +239,12 @@ def test_conflicting_or_malformed_reply_reference_evidence_fails_closed() -> Non
         (
             "reply_human_smoke_sanitized.json",
             "REFIDX_QUOTED_HUMAN",
-            "什么是gil",
+            "解释合成示例",
         ),
         (
             "reply_bot_smoke_sanitized.json",
             "REFIDX_QUOTED_BOT",
-            "GIL 通常指 Global Interpreter Lock（全局解释器锁）。",
+            "合成知识卡片说明：示例功能仅用于离线测试。",
         ),
     ],
 )

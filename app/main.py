@@ -24,7 +24,7 @@ from app.adapters.qq_official import (
     inbound_event_from_gateway_dispatch,
 )
 from app.config import Settings, get_settings
-from app.llm.providers import create_llm_provider
+from app.llm.providers import create_llm_provider, create_vision_provider
 from app.parsers.qq_official_message_parser import QQOfficialMessageParser
 from app.rendering import MessageRenderer, SummaryMessageFormatter
 from app.services.command_dispatch import QQOfficialCommandDispatcher
@@ -33,6 +33,8 @@ from app.services.group_assistant import GroupAssistantService
 from app.services.group_assistant_context import GroupAssistantContextBuilder
 from app.services.group_assistant_handler import GroupAssistantHandler
 from app.services.interaction_dispatch import QQOfficialInteractionDispatcher
+from app.services.image_enrichment import ImageEnrichmentService
+from app.services.image_resources import HttpImageResourceResolver
 from app.services.normalized_message_ingestion import (
     QQOfficialNormalizedMessageIngestionService,
 )
@@ -43,6 +45,7 @@ from app.services.summary import SummaryService
 from app.services.summary_command import SummaryCommandHandler
 from app.storage.database import Database
 from app.storage.assistant_interaction_repository import AssistantInteractionRepository
+from app.storage.command_trigger_claim_repository import CommandTriggerClaimRepository
 from app.storage.message_repository import MessageRepository
 from app.storage.raw_event_repository import RawEventRepository
 from app.storage.summary_repository import SummaryRepository
@@ -80,6 +83,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         assistant_interaction_repository = AssistantInteractionRepository(
             database.session_factory
         )
+        command_trigger_claim_repository = CommandTriggerClaimRepository(
+            database.session_factory
+        )
         auth_client = QQOfficialAuthClient(
             app_id=app_settings.qq_bot_app_id,
             app_secret=app_settings.qq_bot_app_secret,
@@ -91,13 +97,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             timeout_seconds=app_settings.qq_api_timeout_seconds,
             http_client=qq_http_client,
         )
-        ping_command_handler = PingCommandHandler(sender=group_message_sender)
+        ping_command_handler = PingCommandHandler(
+            sender=group_message_sender,
+            claim_repository=command_trigger_claim_repository,
+        )
         summary_command_handler: SummaryCommandHandler | None = None
         assistant_handler: GroupAssistantHandler | None = None
         command_dispatcher = QQOfficialCommandDispatcher(
             ping_handler=ping_command_handler
         )
         llm_provider = None
+        vision_provider = None
+        image_resource_resolver: HttpImageResourceResolver | None = None
+        image_enrichment_service: ImageEnrichmentService | None = None
         gateway_stop = asyncio.Event()
         gateway_client: QQOfficialGatewayClient | None = None
         gateway_task: asyncio.Task[None] | None = None
@@ -172,12 +184,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             llm_provider = create_llm_provider(app_settings)
 
         conversation_query_service = ConversationQueryService(message_repository)
+        if (
+            app_settings.vision_enabled
+            and (
+                app_settings.summary_command_enabled
+                or app_settings.group_assistant_enabled
+            )
+        ):
+            vision_provider = create_vision_provider(
+                app_settings,
+                llm_provider=llm_provider,
+            )
+            assert vision_provider is not None
+            image_resource_resolver = HttpImageResourceResolver(
+                timeout_seconds=app_settings.image_download_timeout_seconds,
+                max_bytes=app_settings.image_max_bytes,
+                client=qq_http_client,
+            )
+            image_enrichment_service = ImageEnrichmentService(
+                enabled=True,
+                resolver=image_resource_resolver,
+                provider=vision_provider,
+            )
         if app_settings.summary_command_enabled:
             assert llm_provider is not None
             summary_service = SummaryService(
                 query_service=conversation_query_service,
                 renderer=MessageRenderer(),
                 provider=llm_provider,
+                image_enrichment_service=image_enrichment_service,
                 max_messages=app_settings.summary_max_messages,
                 max_input_chars=app_settings.summary_max_input_chars,
                 max_output_tokens=app_settings.llm_max_output_tokens,
@@ -190,6 +225,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 enabled=True,
                 lookback_minutes=app_settings.summary_command_lookback_minutes,
                 cooldown_seconds=app_settings.summary_command_cooldown_seconds,
+                claim_repository=command_trigger_claim_repository,
             )
             command_dispatcher = QQOfficialCommandDispatcher(
                 ping_handler=ping_command_handler,
@@ -212,6 +248,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             app_settings.chat_max_assistant_turns
                         ),
                         max_input_chars=app_settings.assistant_max_input_chars,
+                        image_enrichment_service=image_enrichment_service,
                     ),
                     provider=llm_provider,
                     max_output_tokens=app_settings.assistant_max_output_tokens,
@@ -221,6 +258,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 sender=group_message_sender,
                 enabled=True,
                 cooldown_seconds=app_settings.assistant_cooldown_seconds,
+                image_enrichment_service=image_enrichment_service,
             )
 
         interaction_dispatcher = QQOfficialInteractionDispatcher(
@@ -259,11 +297,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         application.state.qq_event_transport = app_settings.qq_event_transport
         application.state.qq_group_message_sender = group_message_sender
         application.state.llm_provider = llm_provider
+        application.state.vision_provider = vision_provider
+        application.state.image_enrichment_service = image_enrichment_service
         application.state.qq_command_dispatcher = command_dispatcher
         application.state.qq_interaction_dispatcher = interaction_dispatcher
         application.state.group_assistant_handler = assistant_handler
         application.state.assistant_interaction_repository = (
             assistant_interaction_repository
+        )
+        application.state.command_trigger_claim_repository = (
+            command_trigger_claim_repository
         )
         application.state.ping_command_handler = ping_command_handler
         application.state.raw_event_repository = raw_repository
@@ -282,6 +325,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if gateway_client is not None:
                 await gateway_client.close()
             await event_processor.aclose()
+            if image_resource_resolver is not None:
+                await image_resource_resolver.aclose()
+            if vision_provider is not None and vision_provider is not llm_provider:
+                await vision_provider.aclose()
             if llm_provider is not None:
                 await llm_provider.aclose()
             await qq_http_client.aclose()

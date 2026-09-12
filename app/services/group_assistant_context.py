@@ -9,6 +9,7 @@ from app.domain.assistant_interactions import AssistantMode, StoredAssistantInte
 from app.domain.messages import InternalMessage
 from app.rendering import MessageRenderer
 from app.services.conversation_query import ConversationQueryService
+from app.services.image_enrichment import ImageEnrichmentService
 from app.storage.assistant_interaction_repository import AssistantInteractionRepository
 
 
@@ -39,6 +40,7 @@ class GroupAssistantContextBuilder:
         chat_max_messages: int,
         chat_max_assistant_turns: int,
         max_input_chars: int,
+        image_enrichment_service: ImageEnrichmentService | None = None,
     ) -> None:
         if renderer.max_chars is not None:
             raise ValueError("assistant renderer must not truncate message facts")
@@ -61,6 +63,7 @@ class GroupAssistantContextBuilder:
         self._chat_max_messages = chat_max_messages
         self._chat_max_assistant_turns = chat_max_assistant_turns
         self._max_input_chars = max_input_chars
+        self._image_enrichment_service = image_enrichment_service
 
     async def build(
         self,
@@ -89,11 +92,13 @@ class GroupAssistantContextBuilder:
                 limit=max_messages,
             )
         )
-        messages = tuple(
+        messages: tuple[InternalMessage, ...] = tuple(
             candidate
             for candidate in queried_messages
             if candidate.platform_message_id != trigger.platform_message_id
         )
+        if self._image_enrichment_service is not None:
+            messages = await self._image_enrichment_service.enrich_messages(messages)
         interactions: tuple[StoredAssistantInteraction, ...] = ()
         if mode is AssistantMode.CHAT:
             interactions = tuple(

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from app.domain.images import ImageDescription, ResolvedImage
 from app.domain.messages import (
     ForwardResolutionStatus,
     ForwardSegment,
@@ -28,6 +29,7 @@ from app.services.summary import (
     SummaryService,
     SummaryWindowTooLarge,
 )
+from app.services.image_enrichment import ImageEnrichmentService
 
 
 START = datetime(2026, 8, 10, tzinfo=timezone.utc)
@@ -407,3 +409,80 @@ async def test_unsafe_domain_fields_never_bypass_renderer() -> None:
         "PRIVATE-FORWARD-ID",
     ):
         assert forbidden not in prompt
+
+
+@pytest.mark.asyncio
+async def test_summary_prompt_includes_text_and_mocked_image_description() -> None:
+    source_image = ImageSegment(
+        position=1,
+        raw_data={"url": "https://private.invalid/image"},
+        file="traceback.png",
+        url="https://media.example.test/traceback.png",
+        summary=None,
+        sub_type=None,
+        file_size=100,
+        content_type="image/png",
+        width=800,
+        height=600,
+    )
+
+    class Resolver:
+        async def resolve(self, image: ImageSegment) -> ResolvedImage:
+            assert image is source_image
+            return ResolvedImage(data=b"mock-png", content_type="image/png")
+
+    class Vision:
+        @property
+        def supports_vision(self) -> bool:
+            return True
+
+        async def describe_image(
+            self,
+            image: ResolvedImage,
+            *,
+            prompt: str,
+        ) -> ImageDescription:
+            assert image.data == b"mock-png"
+            assert "群聊记录" in prompt
+            return ImageDescription(
+                description="Python traceback showing ModuleNotFoundError for httpx"
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    provider = FakeProvider()
+    summary_service, _ = service(
+        (
+            internal_message(
+                "unused",
+                raw_event_id=1,
+                segments=(
+                    TextSegment(
+                        position=0,
+                        raw_data="谁知道这个报错怎么解决？",
+                        text="谁知道这个报错怎么解决？",
+                    ),
+                    source_image,
+                ),
+            ),
+        ),
+        provider,
+        image_enrichment_service=ImageEnrichmentService(
+            enabled=True,
+            resolver=Resolver(),
+            provider=Vision(),
+        ),
+    )
+
+    await summary_service.summarize(
+        platform="qq_official",
+        group_id=GROUP_ID,
+        start_time=START,
+        end_time=END,
+    )
+
+    prompt = provider.requests[0].user_prompt
+    assert "谁知道这个报错怎么解决？" in prompt
+    assert "ModuleNotFoundError" in prompt
+    assert "private.invalid" not in prompt

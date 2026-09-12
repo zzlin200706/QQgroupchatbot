@@ -12,6 +12,7 @@ from app.llm.providers.base import (
     LLMRequestError,
     LLMServerError,
     LLMTimeoutError,
+    VisionProvider,
 )
 
 __all__ = [
@@ -28,4 +29,5 @@ __all__ = [
     "LLMServerError",
     "LLMTimeoutError",
     "LLMUsage",
+    "VisionProvider",
 ]

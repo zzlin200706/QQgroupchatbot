@@ -12,7 +12,7 @@
       "member_openid": "test-user",
       "username": "测试用户"
     },
-    "content": " 那多线程为什么没有这个功能",
+    "content": " 这个合成示例还有哪些限制",
     "group_id": "test-group",
     "group_openid": "test-group",
     "id": "test-human-reply-message",
@@ -26,7 +26,7 @@
     "message_type": 103,
     "msg_elements": [
       {
-        "content": "什么是gil",
+        "content": "解释合成示例",
         "message_type": 103,
         "msg_idx": "REFIDX_QUOTED_HUMAN"
       }

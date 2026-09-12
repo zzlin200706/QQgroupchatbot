@@ -24,6 +24,7 @@ class SummaryCommandStatus(str, Enum):
     DISABLED = "disabled"
     NOT_COMMAND = "not_command"
     INVALID_CONTEXT = "invalid_context"
+    DUPLICATE = "duplicate"
     COOLDOWN = "cooldown"
     IN_PROGRESS = "in_progress"
     GENERATION_FAILED = "generation_failed"
@@ -48,6 +49,10 @@ class _GroupMessageSender(Protocol):
         *,
         msg_id: str | None = None,
     ) -> object: ...
+
+
+class _CommandClaimStore(Protocol):
+    async def claim(self, **kwargs: str) -> bool: ...
 
 
 def is_summary_command(message: InternalMessage) -> bool:
@@ -76,6 +81,7 @@ class SummaryCommandHandler:
         lookback_minutes: int = 120,
         cooldown_seconds: int = 60,
         clock: Callable[[], float] = time.monotonic,
+        claim_repository: _CommandClaimStore | None = None,
     ) -> None:
         if lookback_minutes < 1:
             raise ValueError("lookback_minutes must be at least one")
@@ -89,6 +95,7 @@ class SummaryCommandHandler:
         self._lookback_minutes = lookback_minutes
         self._cooldown_seconds = cooldown_seconds
         self._clock = clock
+        self._claim_repository = claim_repository
         self._state_lock = asyncio.Lock()
         self._active_groups: set[tuple[str, str]] = set()
         self._last_started: dict[tuple[str, str], float] = {}
@@ -110,6 +117,24 @@ class SummaryCommandHandler:
         timestamp = message.timestamp
         assert group_id is not None
         assert timestamp is not None
+        assert message.platform_message_id is not None
+        if self._claim_repository is not None:
+            try:
+                claimed = await self._claim_repository.claim(
+                    platform=message.platform,
+                    group_id=group_id,
+                    trigger_message_id=message.platform_message_id,
+                    command_name="summary",
+                )
+            except Exception as error:
+                logger.warning(
+                    "summary command claim failed error_type=%s",
+                    type(error).__name__,
+                )
+                return SummaryCommandStatus.PERSISTENCE_FAILED
+            if not claimed:
+                logger.info("duplicate summary command ignored")
+                return SummaryCommandStatus.DUPLICATE
         key = (message.platform, group_id)
         claim = await self._claim(key)
         if claim is not None:

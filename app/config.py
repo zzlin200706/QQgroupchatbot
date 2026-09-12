@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     openai_compatible_timeout_seconds: float = Field(default=60.0, gt=0)
     openai_compatible_max_retries: int = Field(default=2, ge=0)
 
+    vision_enabled: bool = False
+    vision_provider: str = "openai_compatible"
+    vision_model: str = ""
+    image_download_timeout_seconds: float = Field(default=15.0, gt=0)
+    image_max_bytes: int = Field(default=10485760, ge=1)
+
     summary_max_messages: int = Field(default=500, ge=1)
     summary_max_input_chars: int = Field(default=120000, ge=1)
     summary_command_enabled: bool = False

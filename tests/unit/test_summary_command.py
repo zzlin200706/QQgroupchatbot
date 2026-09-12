@@ -171,6 +171,24 @@ class FakeSender:
         return object()
 
 
+class FakeClaimRepository:
+    def __init__(
+        self,
+        *,
+        claimed: bool = True,
+        error: Exception | None = None,
+    ) -> None:
+        self.claimed = claimed
+        self.error = error
+        self.calls: list[dict[str, str]] = []
+
+    async def claim(self, **kwargs: str) -> bool:
+        self.calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
+        return self.claimed
+
+
 def handler(
     *,
     service: FakeSummaryService | None = None,
@@ -179,6 +197,7 @@ def handler(
     enabled: bool = True,
     clock=lambda: 100.0,
     cooldown_seconds: int = 60,
+    claim_repository: FakeClaimRepository | None = None,
 ) -> tuple[SummaryCommandHandler, FakeSummaryService, FakeSummaryRepository, FakeSender]:
     service = service or FakeSummaryService()
     repository = repository or FakeSummaryRepository()
@@ -193,6 +212,7 @@ def handler(
             lookback_minutes=120,
             cooldown_seconds=cooldown_seconds,
             clock=clock,
+            claim_repository=claim_repository,
         ),
         service,
         repository,
@@ -390,6 +410,45 @@ async def test_concurrent_same_group_triggers_only_one_generation() -> None:
     assert len(service.calls) == 1
     assert len(repository.results) == 1
     assert len(sender.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_duplicate_summary_claim_prevents_generation_and_send() -> None:
+    claims = FakeClaimRepository(claimed=False)
+    command_handler, service, repository, sender = handler(
+        claim_repository=claims
+    )
+
+    status = await command_handler.handle(message())
+
+    assert status is SummaryCommandStatus.DUPLICATE
+    assert claims.calls == [
+        {
+            "platform": "qq_official",
+            "group_id": "synthetic-group",
+            "trigger_message_id": "message-1",
+            "command_name": "summary",
+        }
+    ]
+    assert service.calls == []
+    assert repository.results == []
+    assert sender.calls == []
+
+
+@pytest.mark.asyncio
+async def test_summary_claim_failure_prevents_generation_and_send() -> None:
+    command_handler, service, repository, sender = handler(
+        claim_repository=FakeClaimRepository(
+            error=RuntimeError("database unavailable")
+        )
+    )
+
+    status = await command_handler.handle(message())
+
+    assert status is SummaryCommandStatus.PERSISTENCE_FAILED
+    assert service.calls == []
+    assert repository.results == []
+    assert sender.calls == []
 
 
 @pytest.mark.asyncio

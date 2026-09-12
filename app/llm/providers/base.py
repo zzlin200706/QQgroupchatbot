@@ -4,12 +4,30 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from app.domain.images import ImageDescription, ResolvedImage
 from app.llm.models import LLMRequest, LLMResponse
 
 
 class LLMProvider(Protocol):
     async def complete(self, request: LLMRequest) -> LLMResponse:
         """Return one non-streaming completion or raise an LLMProviderError."""
+
+
+class VisionProvider(Protocol):
+    @property
+    def supports_vision(self) -> bool:
+        """Return whether image description is configured."""
+
+    async def describe_image(
+        self,
+        image: ResolvedImage,
+        *,
+        prompt: str,
+    ) -> ImageDescription:
+        """Describe one resolved image or raise an LLMProviderError."""
+
+    async def aclose(self) -> None:
+        """Release provider-owned resources."""
 
 
 class LLMProviderError(Exception):

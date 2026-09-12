@@ -4,13 +4,17 @@ import logging
 import httpx
 import pytest
 
+import app.adapters.qq_official.gateway as gateway_module
+
 from app.adapters.qq_official.auth import QQAccessToken
 from app.adapters.qq_official.gateway import (
     GROUP_AND_C2C_EVENT_INTENT,
     QQOfficialGatewayClient,
     QQOfficialGatewayResponseError,
+    QQOfficialGatewayTransportError,
     build_heartbeat_payload,
     build_identify_payload,
+    build_resume_payload,
     parse_gateway_info,
     parse_hello_heartbeat_interval,
 )
@@ -19,6 +23,22 @@ from app.adapters.qq_official.gateway import (
 class FakeAuthClient:
     async def fetch_access_token(self) -> QQAccessToken:
         return QQAccessToken(access_token="test-access-token", expires_in=7200)
+
+
+class FakeWebSocket:
+    def __init__(self, incoming: list[dict[str, object]]) -> None:
+        self._incoming = [json.dumps(payload) for payload in incoming]
+        self.sent: list[dict[str, object]] = []
+        self.closed = False
+
+    async def recv(self) -> str:
+        return self._incoming.pop(0)
+
+    async def send(self, payload: str) -> None:
+        self.sent.append(json.loads(payload))
+
+    async def close(self) -> None:
+        self.closed = True
 
 
 def test_parses_gateway_bot_response() -> None:
@@ -51,6 +71,99 @@ def test_hello_identify_and_heartbeat_protocol_helpers() -> None:
     assert identify["d"]["shard"] == [0, 1]
     assert build_heartbeat_payload(None) == {"op": 1, "d": None}
     assert build_heartbeat_payload(42) == {"op": 1, "d": 42}
+    assert build_resume_payload(
+        "access-token", session_id="session-1", sequence=42
+    ) == {
+        "op": 6,
+        "d": {
+            "token": "QQBot access-token",
+            "session_id": "session-1",
+            "seq": 42,
+        },
+    }
+
+
+def test_gateway_reconnect_and_invalid_session_are_fail_closed() -> None:
+    client = QQOfficialGatewayClient(auth_client=FakeAuthClient())
+    client.handle_payload(
+        {
+            "op": 0,
+            "s": 12,
+            "t": "READY",
+            "d": {"session_id": "session-1", "user": {"id": "bot-1"}},
+        }
+    )
+
+    with pytest.raises(QQOfficialGatewayTransportError, match="reconnect"):
+        client.handle_payload({"op": 7})
+    assert client.ready is not None
+    assert client.latest_sequence == 12
+
+    with pytest.raises(QQOfficialGatewayTransportError, match="invalid"):
+        client.handle_payload({"op": 9, "d": False})
+    assert client.ready is None
+    assert client.latest_sequence is None
+
+
+def test_resumable_invalid_session_retains_session_state() -> None:
+    client = QQOfficialGatewayClient(auth_client=FakeAuthClient())
+    client.handle_payload(
+        {
+            "op": 0,
+            "s": 7,
+            "t": "READY",
+            "d": {"session_id": "session-1", "user": {"id": "bot-1"}},
+        }
+    )
+
+    with pytest.raises(QQOfficialGatewayTransportError, match="invalid"):
+        client.handle_payload({"op": 9, "d": True})
+    assert client.ready is not None
+    assert client.latest_sequence == 7
+
+
+@pytest.mark.asyncio
+async def test_reconnect_resumes_existing_gateway_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    websocket = FakeWebSocket(
+        [
+            {"op": 10, "d": {"heartbeat_interval": 45000}},
+            {"op": 0, "s": 13, "t": "RESUMED", "d": {}},
+        ]
+    )
+
+    async def connect_websocket(*args: object, **kwargs: object) -> FakeWebSocket:
+        return websocket
+
+    monkeypatch.setattr(gateway_module.websockets, "connect", connect_websocket)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"url": "wss://example.invalid/websocket"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = QQOfficialGatewayClient(
+            auth_client=FakeAuthClient(),
+            http_client=http_client,
+        )
+        client.handle_payload(
+            {
+                "op": 0,
+                "s": 12,
+                "t": "READY",
+                "d": {"session_id": "session-1", "user": {"id": "bot-1"}},
+            }
+        )
+        await client.connect()
+        await client.close()
+
+    assert websocket.sent[0] == build_resume_payload(
+        "test-access-token",
+        session_id="session-1",
+        sequence=12,
+    )
+    assert client.latest_sequence == 13
+    assert websocket.closed is True
 
 
 def test_dispatch_updates_sequence_ready_ack_and_redacts_logs(caplog: pytest.LogCaptureFixture) -> None:

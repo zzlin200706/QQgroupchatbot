@@ -253,6 +253,10 @@ def _segment_payload(segment: MessageSegment) -> tuple[str, dict[str, Any]]:
             "summary": segment.summary,
             "sub_type": segment.sub_type,
             "file_size": segment.file_size,
+            "content_type": segment.content_type,
+            "width": segment.width,
+            "height": segment.height,
+            "description": segment.description,
             "raw_data": copy.deepcopy(segment.raw_data),
         }
     if isinstance(segment, ReplySegment):
@@ -362,6 +366,10 @@ class _NodeDecoder:
                     summary=payload.get("summary"),
                     sub_type=payload.get("sub_type"),
                     file_size=payload.get("file_size"),
+                    content_type=payload.get("content_type"),
+                    width=payload.get("width"),
+                    height=payload.get("height"),
+                    description=payload.get("description"),
                     **common,
                 )
             elif node.node_kind == "reply":

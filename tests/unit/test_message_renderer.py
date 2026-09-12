@@ -148,6 +148,32 @@ def test_segment_order_and_exact_id_mention_resolution() -> None:
     )
 
 
+def test_derived_image_description_takes_precedence_over_platform_summary() -> None:
+    rendered = MessageRenderer().render_message(
+        message(
+            ImageSegment(
+                position=0,
+                raw_data={"url": "private"},
+                file="screen.png",
+                url="https://private.invalid/image",
+                summary="platform summary",
+                sub_type=None,
+                file_size=10,
+                content_type="image/png",
+                width=100,
+                height=50,
+                description="Python traceback showing ModuleNotFoundError",
+            )
+        )
+    )
+
+    assert rendered.endswith(
+        "[图片: Python traceback showing ModuleNotFoundError]"
+    )
+    assert "platform summary" not in rendered
+    assert "private.invalid" not in rendered
+
+
 def test_all_file_unknown_and_media_fields_are_safe() -> None:
     rendered = MessageRenderer().render_message(
         message(
@@ -457,7 +483,7 @@ def test_identity_labels_timezone_and_truncation_are_explicit() -> None:
 @pytest.mark.parametrize(
     ("filename", "expected"),
     [
-        ("001_text.json", "phase-d-test-001"),
+        ("001_text.json", "synthetic-text-001"),
         ("002_at_bot.json", "@Christina"),
         ("004_image.json", "[图片]"),
         ("009_file.json", "[文件:"),
@@ -488,7 +514,7 @@ def test_qq_official_103_refidx_and_102_forward_are_not_reparsed() -> None:
     reply_text = MessageRenderer(include_platform_ids=True).render_message(reply)
     forward_text = MessageRenderer().render_message(forward)
 
-    assert "[回复 [原作者不可用]: 原消息后恢复原消息]" in reply_text
+    assert "[回复 [原作者不可用]: 合成引用消息正文]" in reply_text
     assert "REFIDX_" not in reply_text
     assert forward_text.endswith("[合并转发：内容未解析]")
     assert "[发送者]" not in forward_text

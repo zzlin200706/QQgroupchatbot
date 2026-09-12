@@ -60,8 +60,8 @@ async def test_qq_official_sample_renders_consistently_after_db_round_trip(
 
         rendered = MessageRenderer().render_conversation((loaded,))
 
-        assert "phase-d-test-001" in rendered
-        assert "A8CA550978D826B0784F510188F5BE35" not in rendered
+        assert "synthetic-text-001" in rendered
+        assert "fixture-private-member-id" not in rendered
         assert "ROBOT1.0_" not in rendered
     finally:
         await database.dispose()

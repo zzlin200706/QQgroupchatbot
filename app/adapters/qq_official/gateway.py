@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 QQ_OFFICIAL_OPENAPI_BASE_URL = "https://api.bot.qq.com"
 QQ_OFFICIAL_GATEWAY_BOT_PATH = "/gateway/bot"
 GROUP_AND_C2C_EVENT_INTENT = 1 << 25
+_SESSION_INVALID_CLOSE_CODES = frozenset({4006, 4007, 4009})
 GatewayEventHandler = Callable[["QQGatewayDispatch"], Awaitable[None] | None]
 
 
@@ -108,6 +109,30 @@ def build_heartbeat_payload(sequence: int | None) -> dict[str, object]:
     return {"op": 1, "d": sequence}
 
 
+def build_resume_payload(
+    access_token: str,
+    *,
+    session_id: str,
+    sequence: int,
+) -> dict[str, object]:
+    """Build the QQ Gateway resume payload for an established session."""
+
+    if not access_token.strip():
+        raise ValueError("access_token must not be empty")
+    if not session_id.strip():
+        raise ValueError("session_id must not be empty")
+    if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0:
+        raise ValueError("sequence must be a non-negative integer")
+    return {
+        "op": 6,
+        "d": {
+            "token": f"QQBot {access_token}",
+            "session_id": session_id,
+            "seq": sequence,
+        },
+    }
+
+
 def parse_gateway_info(payload: object) -> QQGatewayInfo:
     if not isinstance(payload, Mapping):
         raise QQOfficialGatewayResponseError("Gateway response must be a JSON object")
@@ -134,7 +159,7 @@ def parse_hello_heartbeat_interval(payload: object) -> float:
 
 
 class QQOfficialGatewayClient:
-    """Single-shard, no-resume client that delivers raw Gateway Dispatches."""
+    """Single-shard Gateway client with in-process session resume support."""
 
     def __init__(
         self,
@@ -177,7 +202,7 @@ class QQOfficialGatewayClient:
         return self._last_heartbeat_ack
 
     async def connect(self) -> None:
-        """Obtain URL then complete Hello → Identify → READY once."""
+        """Obtain a URL and complete Identify/Resume before consuming events."""
 
         access_token = await self._auth_client.fetch_access_token()
         gateway_info = await self._fetch_gateway_info(access_token.access_token)
@@ -192,7 +217,20 @@ class QQOfficialGatewayClient:
             self._heartbeat_interval_seconds = parse_hello_heartbeat_interval(
                 await self._receive_payload(timeout_seconds=self._timeout_seconds)
             )
-            await self._send_payload(build_identify_payload(access_token.access_token))
+            if (
+                self._ready is not None
+                and self._ready.session_id is not None
+                and self._latest_sequence is not None
+            ):
+                await self._send_payload(
+                    build_resume_payload(
+                        access_token.access_token,
+                        session_id=self._ready.session_id,
+                        sequence=self._latest_sequence,
+                    )
+                )
+            else:
+                await self._send_payload(build_identify_payload(access_token.access_token))
             self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
             await self._wait_for_ready()
         except Exception:
@@ -223,10 +261,17 @@ class QQOfficialGatewayClient:
 
         if not isinstance(payload, Mapping):
             raise QQOfficialGatewayProtocolError("Gateway payload must be a JSON object")
-        if payload.get("op") == 11:
+        opcode = payload.get("op")
+        if opcode == 11:
             self._last_heartbeat_ack = True
             return None
-        if payload.get("op") != 0:
+        if opcode == 7:
+            raise QQOfficialGatewayTransportError("QQ Official Gateway requested reconnect")
+        if opcode == 9:
+            if payload.get("d") is not True:
+                self._clear_session()
+            raise QQOfficialGatewayTransportError("QQ Official Gateway session became invalid")
+        if opcode != 0:
             return None
         sequence = _integer(payload.get("s"))
         if sequence is not None:
@@ -274,7 +319,7 @@ class QQOfficialGatewayClient:
             dispatch = self.handle_payload(
                 await self._receive_payload(timeout_seconds=self._timeout_seconds)
             )
-            if dispatch is not None and dispatch.event_type == "READY":
+            if dispatch is not None and dispatch.event_type in {"READY", "RESUMED"}:
                 return
 
     async def _heartbeat_loop(self) -> None:
@@ -305,7 +350,11 @@ class QQOfficialGatewayClient:
             raise QQOfficialGatewayTransportError(
                 "QQ Official Gateway receive timed out"
             ) from error
-        except (ConnectionClosed, OSError, WebSocketException) as error:
+        except ConnectionClosed as error:
+            if getattr(error, "code", None) in _SESSION_INVALID_CLOSE_CODES:
+                self._clear_session()
+            raise QQOfficialGatewayTransportError("QQ Official Gateway connection closed") from error
+        except (OSError, WebSocketException) as error:
             raise QQOfficialGatewayTransportError("QQ Official Gateway connection closed") from error
         except (TypeError, json.JSONDecodeError) as error:
             raise QQOfficialGatewayProtocolError("QQ Official Gateway sent invalid JSON") from error
@@ -334,6 +383,10 @@ class QQOfficialGatewayClient:
         result = self._event_handler(dispatch)
         if inspect.isawaitable(result):
             await result
+
+    def _clear_session(self) -> None:
+        self._ready = None
+        self._latest_sequence = None
 
 
 def _integer(value: object) -> int | None:

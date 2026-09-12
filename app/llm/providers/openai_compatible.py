@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping
@@ -10,6 +11,7 @@ from typing import Any
 
 import httpx
 
+from app.domain.images import ImageDescription, ResolvedImage
 from app.llm.models import LLMRequest, LLMResponse, LLMUsage
 from app.llm.providers.base import (
     LLMAuthenticationError,
@@ -38,6 +40,7 @@ class OpenAICompatibleProvider:
         api_key: str,
         base_url: str,
         model: str,
+        vision_model: str | None = None,
         timeout_seconds: float = 60.0,
         max_retries: int = 2,
         client: httpx.AsyncClient | None = None,
@@ -58,6 +61,7 @@ class OpenAICompatibleProvider:
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
         self._model = model
+        self._vision_model = vision_model
         self._timeout = httpx.Timeout(timeout_seconds)
         self._max_retries = max_retries
         self._sleep = sleep
@@ -75,6 +79,62 @@ class OpenAICompatibleProvider:
             ],
             "stream": False,
         }
+        return await self._complete_payload(
+            payload,
+            configured_model=self._model,
+            json_output=request.json_output,
+            input_char_count=len(request.system_prompt) + len(request.user_prompt),
+        )
+
+    @property
+    def supports_vision(self) -> bool:
+        return bool(self._vision_model)
+
+    async def describe_image(
+        self,
+        image: ResolvedImage,
+        *,
+        prompt: str,
+    ) -> ImageDescription:
+        if not self._vision_model:
+            raise LLMRequestError("OpenAI-compatible vision model is not configured")
+        if not prompt.strip():
+            raise ValueError("vision prompt must not be empty")
+        encoded = base64.b64encode(image.data).decode("ascii")
+        payload: dict[str, Any] = {
+            "model": self._vision_model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{image.content_type};base64,{encoded}"
+                            },
+                        },
+                    ],
+                }
+            ],
+            "stream": False,
+        }
+        response = await self._complete_payload(
+            payload,
+            configured_model=self._vision_model,
+            json_output=False,
+            input_char_count=len(prompt),
+        )
+        return ImageDescription(description=response.content)
+
+    async def _complete_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        configured_model: str,
+        json_output: bool,
+        input_char_count: int,
+    ) -> LLMResponse:
 
         for attempt in range(self._max_retries + 1):
             try:
@@ -95,7 +155,8 @@ class OpenAICompatibleProvider:
                     failure,
                     attempt=attempt,
                     http_status=None,
-                    request=request,
+                    input_char_count=input_char_count,
+                    configured_model=configured_model,
                 ):
                     continue
                 raise failure from error
@@ -107,7 +168,8 @@ class OpenAICompatibleProvider:
                     failure,
                     attempt=attempt,
                     http_status=None,
-                    request=request,
+                    input_char_count=input_char_count,
+                    configured_model=configured_model,
                 ):
                     continue
                 raise failure from error
@@ -120,7 +182,8 @@ class OpenAICompatibleProvider:
                         failure,
                         attempt=attempt,
                         http_status=response.status_code,
-                        request=request,
+                        input_char_count=input_char_count,
+                        configured_model=configured_model,
                     )
                 ):
                     continue
@@ -129,15 +192,16 @@ class OpenAICompatibleProvider:
             try:
                 return _decode_response(
                     response,
-                    configured_model=self._model,
-                    json_output=request.json_output,
+                    configured_model=configured_model,
+                    json_output=json_output,
                 )
             except LLMInvalidResponseError as failure:
                 if await self._retry(
                     failure,
                     attempt=attempt,
                     http_status=response.status_code,
-                    request=request,
+                    input_char_count=input_char_count,
+                    configured_model=configured_model,
                 ):
                     continue
                 raise
@@ -154,17 +218,18 @@ class OpenAICompatibleProvider:
         *,
         attempt: int,
         http_status: int | None,
-        request: LLMRequest,
+        input_char_count: int,
+        configured_model: str,
     ) -> bool:
         if attempt >= self._max_retries:
             return False
         logger.warning(
             "llm request retry provider=openai_compatible model=%s http_status=%s attempt=%s exception_type=%s input_char_count=%s",
-            self._model,
+            configured_model,
             http_status,
             attempt + 1,
             type(failure).__name__,
-            len(request.system_prompt) + len(request.user_prompt),
+            input_char_count,
         )
         await self._sleep(0.5 * (2**attempt))
         return True

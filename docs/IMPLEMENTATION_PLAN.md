@@ -1,6 +1,6 @@
 # IMPLEMENTATION_PLAN.md
 
-文档更新时间：`2026-08-11`
+文档更新时间：`2026-08-12`
 
 ## 计划总原则
 
@@ -12,9 +12,19 @@
 - `raw-first`
 - `InternalMessage first`
 - `LLMProvider abstraction`
-- `先完成真实文本闭环，再扩展 provider，再做多模态`
+- `文本、图片、provider 都保持独立边界并由显式 trigger 驱动`
 
 不再把 `NapCat`、`OneBot 11` 或兼容层当作未来 phase。
+
+## Current Completion Status
+
+- QQ Official WebSocket runtime、raw-first persistence、parser/storage、commands、assistant、summary 和 multimodal implementation 已通过自动化验证
+- current full suite: `361 passed`
+- default transport: `websocket`
+- real OpenAI-compatible text / `#总结` smoke: passed in the existing deployment history
+- real QQ webhook smoke: pending
+- real QQ image + configured vision model smoke: pending
+- reply-only automatic continuation: intentionally unsupported
 
 ## Historical / Completed Foundation
 
@@ -22,7 +32,7 @@
 
 - QQ Official AccessToken 获取
 - QQ Official `/gateway/bot` 接入点获取
-- Gateway HELLO / IDENTIFY / HEARTBEAT
+- Gateway HELLO / IDENTIFY / RESUME / HEARTBEAT
 - reconnect loop 与 `session_start_limit` 感知退避
 - QQ Official raw event capture 与 `raw_events` 落库
 - `QQOfficialMessageParser`
@@ -40,7 +50,7 @@
 
 这些基础已经足以支撑后续真实环境 smoke test 和 provider 扩展。
 
-## Current Phase — DeepSeek Real End-to-End Validation
+## Historical Phase — DeepSeek Real End-to-End Validation
 
 ### 目标
 
@@ -101,7 +111,7 @@
 - 即使官方文档当前仍描述主动消息规则，本项目当前验证目标仍只覆盖由入站消息触发的被动回复
 - 不把“只有 `group_id` 的主动群发”纳入当前 phase
 
-## Current Phase — OpenAICompatibleProvider + Relay Integration
+## Completed Phase — OpenAICompatibleProvider + Relay Integration
 
 ### 目标
 
@@ -117,7 +127,7 @@ SummaryService
 当前实际部署目标：
 
 - `LLM_PROVIDER=openai_compatible`
-- `OPENAI_COMPATIBLE_BASE_URL=https://4router.net/v1`
+- `OPENAI_COMPATIBLE_BASE_URL=https://relay.example.test/v1`
 - `OPENAI_COMPATIBLE_MODEL=gpt-5.6-luna`
 - relay token 侧已选择 `GptPro` 分组，但应用程序不处理任何 group / pool / channel / multiplier 概念
 - `long_context` 当前禁用，程序不发送相关参数
@@ -150,7 +160,7 @@ OPENAI_COMPATIBLE_MODEL=gpt-5.6-luna
 - 最终请求应为 `{base_url}/chat/completions`
 - 不把 relay group / GptPro / long_context / model routing 写进业务层或 request payload
 
-## Current Phase — QQ Official Bot Actions + Command E2E
+## Completed Phase — QQ Official Bot Actions + Command E2E
 
 ### 目标
 
@@ -221,7 +231,7 @@ QQ Official Gateway
 - 尚未做真实群 `#ping`
 - 尚未做真实群 `#总结`
 
-## Current Phase — QQ Official Webhook-ready Inbound Architecture
+## Completed Implementation — QQ Official Webhook-ready Inbound Architecture
 
 ### 目标
 
@@ -319,7 +329,7 @@ ASSISTANT_COOLDOWN_SECONDS=3
 ### 当前状态
 
 - implementation validated
-- automated unit/integration tests: `309 passed`
+- automated unit/integration tests remain covered by the current full suite
 - real QQ assistant smoke pending
 - default inbound transport remains `websocket`
 - Phase M webhook automated support remains validated; real webhook smoke remains pending
@@ -336,11 +346,9 @@ LLM_PROVIDER
 
 第一版只需要简单显式配置，不需要复杂 registry 或 plugin framework。
 
-## Next Phase — QQ Official Parser Cross-check
+## QQ Official Parser Evidence Policy
 
-DeepSeek 文本闭环稳定后，安排独立的 parser cross-check 阶段。
-
-目标不是立刻重构 parser，而是逐项核对：
+Parser 新字段继续逐项核对：
 
 1. 腾讯当前官方文档
 2. 仓库真实脱敏 samples
@@ -356,31 +364,46 @@ DeepSeek 文本闭环稳定后，安排独立的 parser cross-check 阶段。
 - `message_type` 的已知语义
 - `author` / `sender` / `member_openid` 的可用字段
 
-只有在三方交叉验证后，才决定是否需要调整 parser 细节。
+只有在证据充分后才调整 parser 细节。当前 image attachment 字段已按腾讯官方文档和仓库真实脱敏 samples 交叉核对；无法确认的 attachment 继续成为 `UnknownSegment`。
 
 如果未来需要 reply / forward 补全，统一走概念化的 `MessageReferenceResolver` 边界，而不是把历史平台 action 名称带回当前架构。
 
-## Next Phase — Multimodal Foundation
+## Completed — Image / Multimodal Support
 
-文本 summary 闭环和 provider 抽象稳定后，再开始图片多模态基础：
+图片能力采用按需 enrichment，不改变 text provider contract：
 
 ```text
-InternalMessage
-        ↓
-MediaResolver
-        ↓
-Image / Media metadata
-        ↓
-MultimodalPolicy
-        ↓
-是否需要理解图片？
-        ├── No  → 普通文本 LLM
-        └── Yes → vision-capable provider/model
-                    ↓
-             ImageUnderstandingResult
+QQ attachment
+→ ImageSegment source metadata
+→ SQLite message_nodes
+→ HttpImageResourceResolver
+→ VisionProvider
+→ validated ImageDescription
+→ immutable enriched message copy
+→ MessageRenderer
+→ SummaryService / GroupAssistantService
 ```
 
-当前不要把图片理解混进 `SummaryService`。
+已实现：
+
+- JPEG / PNG / GIF metadata parsing 与树形存储 round-trip
+- public HTTP(S)、redirect、timeout、MIME、empty body 和最大 bytes 防护
+- OpenAI-compatible multimodal data-URL request，model 可配置且不复制 secret 配置
+- summary、grounded QA、structured `@bot` 当前图片与历史图片按需 enrichment
+- 单图失败降级，不影响 raw/normalized persistence 和其他 segment
+- 普通图片不触发下载、不调用 vision/text LLM、不回复
+- 本地人工脚本 `scripts/test_image_vision.py`
+
+AI description 是 transient derived data，不作为 source truth 持久化。真实 QQ image + provider smoke pending；自动化测试只使用 HTTP/fake provider boundary。
+
+## Completed — Reliability Hardening
+
+- `assistant_trigger_claims` 防止 assistant logical trigger 重复调用 LLM/发送
+- `command_trigger_claims` 防止重复投递的 `#ping/#总结` 再次发送或生成
+- duplicate raw receipts 仍保留，便于追踪平台重投
+- conversation query 对同 platform/group 的稳定 QQ message ID 返回最新 normalized representation，避免重复历史污染 QA/summary；无 ID 时不猜测
+- Gateway 在同一进程重连时使用官方 `op=6` session resume；无效 session fail closed 并回退 IDENTIFY
+- restart 后 SQLite 历史、claims、summaries 和 assistant interactions 保持可用
 
 ## Completed in Phase N — Mention Chat
 

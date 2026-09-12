@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 from app.adapters.qq_official.gateway import QQGatewayDispatch
+from app.domain.images import ImageDescription, ResolvedImage
+from app.domain.messages import ImageSegment
 from app.llm import LLMRequest, LLMResponse
 from app.parsers import QQOfficialMessageParser
 from app.rendering import MessageRenderer, SummaryMessageFormatter
@@ -14,6 +16,7 @@ from app.services.conversation_query import ConversationQueryService
 from app.services.normalized_message_ingestion import (
     QQOfficialNormalizedMessageIngestionService,
 )
+from app.services.image_enrichment import ImageEnrichmentService
 from app.services.raw_event_ingestion import QQOfficialRawEventIngestionService
 from app.services.summary import SummaryService
 from app.services.summary_command import SummaryCommandHandler, SummaryCommandStatus
@@ -63,23 +66,32 @@ class FakeQQOfficialSender:
         return object()
 
 
-def dispatch(*, timestamp: str, message_id: str, text: str) -> QQGatewayDispatch:
+def dispatch(
+    *,
+    timestamp: str,
+    message_id: str,
+    text: str,
+    attachments: list[dict] | None = None,
+) -> QQGatewayDispatch:
+    data = {
+        "author": {
+            "id": "member-1",
+            "member_openid": "member-1",
+            "username": "测试成员",
+        },
+        "content": text,
+        "group_id": "group-1",
+        "group_openid": "group-1",
+        "id": message_id,
+        "message_type": 0,
+        "timestamp": timestamp,
+    }
+    if attachments is not None:
+        data["attachments"] = attachments
     return QQGatewayDispatch(
         sequence=1,
         event_type="GROUP_MESSAGE_CREATE",
-        data={
-            "author": {
-                "id": "member-1",
-                "member_openid": "member-1",
-                "username": "测试成员",
-            },
-            "content": text,
-            "group_id": "group-1",
-            "group_openid": "group-1",
-            "id": message_id,
-            "message_type": 0,
-            "timestamp": timestamp,
-        },
+        data=data,
     )
 
 
@@ -157,5 +169,104 @@ async def test_manual_command_closes_generation_persistence_send_loop(
                 "command-1",
             )
         ]
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_image_history_is_enriched_between_query_and_summary_render(
+    tmp_path: Path,
+) -> None:
+    class Resolver:
+        async def resolve(self, image: ImageSegment) -> ResolvedImage:
+            assert image.file == "traceback.png"
+            return ResolvedImage(data=b"mock-png", content_type="image/png")
+
+    class Vision:
+        @property
+        def supports_vision(self) -> bool:
+            return True
+
+        async def describe_image(
+            self,
+            image: ResolvedImage,
+            *,
+            prompt: str,
+        ) -> ImageDescription:
+            return ImageDescription(
+                description="Python traceback showing ModuleNotFoundError for httpx"
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'image-summary.db'}")
+    await database.initialize()
+    raw_repository = RawEventRepository(database.session_factory)
+    message_repository = MessageRepository(database.session_factory)
+    raw_ingestion = QQOfficialRawEventIngestionService(raw_repository)
+    normalized_ingestion = QQOfficialNormalizedMessageIngestionService(
+        repository=message_repository,
+        parser=QQOfficialMessageParser(),
+    )
+    provider = FakeLLMProvider()
+    sender = FakeQQOfficialSender()
+    handler = SummaryCommandHandler(
+        summary_service=SummaryService(
+            query_service=ConversationQueryService(message_repository),
+            renderer=MessageRenderer(),
+            provider=provider,
+            image_enrichment_service=ImageEnrichmentService(
+                enabled=True,
+                resolver=Resolver(),
+                provider=Vision(),
+            ),
+        ),
+        summary_repository=SummaryRepository(database.session_factory),
+        formatter=SummaryMessageFormatter(),
+        sender=sender,
+        enabled=True,
+        lookback_minutes=120,
+        cooldown_seconds=0,
+    )
+    try:
+        history_raw = await raw_ingestion.ingest(
+            dispatch(
+                timestamp="2026-08-10T16:00:00+08:00",
+                message_id="image-history",
+                text="谁知道这个报错怎么解决？",
+                attachments=[
+                    {
+                        "content_type": "image/png",
+                        "filename": "traceback.png",
+                        "height": 600,
+                        "size": 123,
+                        "url": "https://media.example.test/traceback.png",
+                        "width": 800,
+                    }
+                ],
+            )
+        )
+        command_raw = await raw_ingestion.ingest(
+            dispatch(
+                timestamp="2026-08-10T17:00:00+08:00",
+                message_id="summary-command",
+                text="#总结",
+            )
+        )
+        assert history_raw is not None and command_raw is not None
+        await normalized_ingestion.ingest(history_raw)
+        command = await normalized_ingestion.ingest(command_raw)
+        assert command is not None
+
+        status = await handler.handle(command)
+
+        assert status is SummaryCommandStatus.SUCCEEDED
+        assert len(provider.requests) == 1
+        prompt = provider.requests[0].user_prompt
+        assert "谁知道这个报错怎么解决？" in prompt
+        assert "ModuleNotFoundError" in prompt
+        assert "media.example.test" not in prompt
+        assert sender.calls[0][2] == "summary-command"
     finally:
         await database.dispose()
