@@ -3,22 +3,14 @@
 from __future__ import annotations
 
 import logging
-from enum import Enum
 from typing import Protocol
+
+from app.services.command_status import CommandStatus
 
 from app.domain.messages import InternalMessage, ProvenanceSource, TextSegment
 
 
 logger = logging.getLogger(__name__)
-
-
-class PingCommandStatus(str, Enum):
-    NOT_COMMAND = "not_command"
-    INVALID_CONTEXT = "invalid_context"
-    DUPLICATE = "duplicate"
-    PERSISTENCE_FAILED = "persistence_failed"
-    SEND_FAILED = "send_failed"
-    SUCCEEDED = "succeeded"
 
 
 class _GroupMessageSender(Protocol):
@@ -59,11 +51,11 @@ class PingCommandHandler:
         self._sender = sender
         self._claim_repository = claim_repository
 
-    async def handle(self, message: InternalMessage) -> PingCommandStatus:
+    async def handle(self, message: InternalMessage) -> CommandStatus:
         if not is_ping_command(message):
-            return PingCommandStatus.NOT_COMMAND
+            return CommandStatus.NOT_COMMAND
         if not self._valid_context(message):
-            return PingCommandStatus.INVALID_CONTEXT
+            return CommandStatus.INVALID_CONTEXT
 
         group_id = message.context.group_id
         message_id = message.platform_message_id
@@ -82,10 +74,10 @@ class PingCommandHandler:
                     "ping command claim failed error_type=%s",
                     type(error).__name__,
                 )
-                return PingCommandStatus.PERSISTENCE_FAILED
+                return CommandStatus.PERSISTENCE_FAILED
             if not claimed:
                 logger.info("duplicate ping command ignored")
-                return PingCommandStatus.DUPLICATE
+                return CommandStatus.DUPLICATE
         try:
             await self._sender.send_group_message(
                 group_id,
@@ -93,13 +85,13 @@ class PingCommandHandler:
                 msg_id=message_id,
             )
             logger.info("ping command send succeeded")
-            return PingCommandStatus.SUCCEEDED
+            return CommandStatus.SUCCEEDED
         except Exception as error:
             logger.warning(
                 "ping command send failed error_type=%s",
                 type(error).__name__,
             )
-            return PingCommandStatus.SEND_FAILED
+            return CommandStatus.SEND_FAILED
 
     @staticmethod
     def _valid_context(message: InternalMessage) -> bool:

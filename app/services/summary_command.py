@@ -6,8 +6,9 @@ import logging
 import time
 from collections.abc import Callable
 from datetime import timedelta
-from enum import Enum
 from typing import Protocol
+
+from app.services.command_status import CommandStatus
 
 from app.domain.messages import InternalMessage, ProvenanceSource, TextSegment
 from app.domain.summaries import StoredSummary, SummaryResult
@@ -17,19 +18,6 @@ from app.storage.summary_repository import SummaryRepository
 
 
 logger = logging.getLogger(__name__)
-
-
-class SummaryCommandStatus(str, Enum):
-    DISABLED = "disabled"
-    NOT_COMMAND = "not_command"
-    INVALID_CONTEXT = "invalid_context"
-    DUPLICATE = "duplicate"
-    COOLDOWN = "cooldown"
-    IN_PROGRESS = "in_progress"
-    GENERATION_FAILED = "generation_failed"
-    PERSISTENCE_FAILED = "persistence_failed"
-    SEND_FAILED = "send_failed"
-    SUCCEEDED = "succeeded"
 
 
 class _SummaryGenerator(Protocol):
@@ -101,15 +89,15 @@ class SummaryCommandHandler:
     async def handle(
         self,
         message: InternalMessage,
-    ) -> SummaryCommandStatus:
+    ) -> CommandStatus:
         """Handle a normalized inbound event without exposing failures upstream."""
 
         if not self._enabled:
-            return SummaryCommandStatus.DISABLED
+            return CommandStatus.DISABLED
         if not is_summary_command(message):
-            return SummaryCommandStatus.NOT_COMMAND
+            return CommandStatus.NOT_COMMAND
         if not self._valid_context(message):
-            return SummaryCommandStatus.INVALID_CONTEXT
+            return CommandStatus.INVALID_CONTEXT
 
         group_id = message.context.group_id
         timestamp = message.timestamp
@@ -129,20 +117,20 @@ class SummaryCommandHandler:
                     "summary command claim failed error_type=%s",
                     type(error).__name__,
                 )
-                return SummaryCommandStatus.PERSISTENCE_FAILED
+                return CommandStatus.PERSISTENCE_FAILED
             if not claimed:
                 logger.info("duplicate summary command ignored")
-                return SummaryCommandStatus.DUPLICATE
+                return CommandStatus.DUPLICATE
         key = (message.platform, group_id)
         if key in self._active_groups:
-            return SummaryCommandStatus.IN_PROGRESS
+            return CommandStatus.IN_PROGRESS
         now = self._clock()
         last_started = self._last_started.get(key)
         if (
             last_started is not None
             and now - last_started < self._cooldown_seconds
         ):
-            return SummaryCommandStatus.COOLDOWN
+            return CommandStatus.COOLDOWN
         self._active_groups.add(key)
         self._last_started[key] = now
 
@@ -162,7 +150,7 @@ class SummaryCommandHandler:
                     "summary generation failed error_type=%s",
                     type(error).__name__,
                 )
-                return SummaryCommandStatus.GENERATION_FAILED
+                return CommandStatus.GENERATION_FAILED
 
             try:
                 await self._summary_repository.persist(result)
@@ -172,7 +160,7 @@ class SummaryCommandHandler:
                     "summary persistence failed error_type=%s",
                     type(error).__name__,
                 )
-                return SummaryCommandStatus.PERSISTENCE_FAILED
+                return CommandStatus.PERSISTENCE_FAILED
 
             outbound = self._formatter.format(result)
             try:
@@ -182,13 +170,13 @@ class SummaryCommandHandler:
                     msg_id=message.platform_message_id,
                 )
                 logger.info("summary send succeeded")
-                return SummaryCommandStatus.SUCCEEDED
+                return CommandStatus.SUCCEEDED
             except Exception as error:
                 logger.warning(
                     "summary send failed error_type=%s",
                     type(error).__name__,
                 )
-                return SummaryCommandStatus.SEND_FAILED
+                return CommandStatus.SEND_FAILED
         finally:
             self._active_groups.discard(key)
 

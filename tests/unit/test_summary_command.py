@@ -25,9 +25,9 @@ from app.domain.messages import (
 )
 from app.domain.summaries import StoredSummary, SummaryResult
 from app.rendering import SummaryMessageFormatter
+from app.services.command_status import CommandStatus
 from app.services.summary_command import (
     SummaryCommandHandler,
-    SummaryCommandStatus,
     is_summary_command,
 )
 
@@ -317,7 +317,7 @@ async def test_invalid_context_never_generates(candidate: InternalMessage) -> No
 
     status = await command_handler.handle(candidate)
 
-    assert status is SummaryCommandStatus.INVALID_CONTEXT
+    assert status is CommandStatus.INVALID_CONTEXT
     assert service.calls == []
     assert repository.results == []
     assert sender.calls == []
@@ -329,7 +329,7 @@ async def test_disabled_command_never_generates() -> None:
 
     status = await command_handler.handle(message())
 
-    assert status is SummaryCommandStatus.DISABLED
+    assert status is CommandStatus.DISABLED
     assert service.calls == []
 
 
@@ -339,7 +339,7 @@ async def test_ordinary_text_is_not_routed_to_summary_service() -> None:
 
     status = await command_handler.handle(message(TextSegment(0, {}, "你好")))
 
-    assert status is SummaryCommandStatus.NOT_COMMAND
+    assert status is CommandStatus.NOT_COMMAND
     assert service.calls == []
     assert repository.results == []
     assert sender.calls == []
@@ -364,7 +364,7 @@ async def test_window_persistence_and_send_order_are_explicit() -> None:
 
     status = await command_handler.handle(message())
 
-    assert status is SummaryCommandStatus.SUCCEEDED
+    assert status is CommandStatus.SUCCEEDED
     assert events == ["generate", "persist", "send"]
     assert service.calls[0]["platform"] == "qq_official"
     assert service.calls[0]["group_id"] == "synthetic-group"
@@ -387,10 +387,10 @@ async def test_cooldown_is_per_group_and_uses_injected_clock() -> None:
     current[0] = 160.0
     third = await command_handler.handle(message())
 
-    assert first is SummaryCommandStatus.SUCCEEDED
-    assert second is SummaryCommandStatus.COOLDOWN
-    assert other_group is SummaryCommandStatus.SUCCEEDED
-    assert third is SummaryCommandStatus.SUCCEEDED
+    assert first is CommandStatus.SUCCEEDED
+    assert second is CommandStatus.COOLDOWN
+    assert other_group is CommandStatus.SUCCEEDED
+    assert third is CommandStatus.SUCCEEDED
     assert len(service.calls) == 3
 
 
@@ -405,8 +405,8 @@ async def test_concurrent_same_group_triggers_only_one_generation() -> None:
     service.release.set()
     first = await asyncio.wait_for(first_task, timeout=1)
 
-    assert first is SummaryCommandStatus.SUCCEEDED
-    assert second is SummaryCommandStatus.IN_PROGRESS
+    assert first is CommandStatus.SUCCEEDED
+    assert second is CommandStatus.IN_PROGRESS
     assert len(service.calls) == 1
     assert len(repository.results) == 1
     assert len(sender.calls) == 1
@@ -421,7 +421,7 @@ async def test_duplicate_summary_claim_prevents_generation_and_send() -> None:
 
     status = await command_handler.handle(message())
 
-    assert status is SummaryCommandStatus.DUPLICATE
+    assert status is CommandStatus.DUPLICATE
     assert claims.calls == [
         {
             "platform": "qq_official",
@@ -445,7 +445,7 @@ async def test_summary_claim_failure_prevents_generation_and_send() -> None:
 
     status = await command_handler.handle(message())
 
-    assert status is SummaryCommandStatus.PERSISTENCE_FAILED
+    assert status is CommandStatus.PERSISTENCE_FAILED
     assert service.calls == []
     assert repository.results == []
     assert sender.calls == []
@@ -459,7 +459,7 @@ async def test_generation_failure_does_not_persist_or_send() -> None:
 
     status = await command_handler.handle(message())
 
-    assert status is SummaryCommandStatus.GENERATION_FAILED
+    assert status is CommandStatus.GENERATION_FAILED
     assert len(service.calls) == 1
     assert repository.results == []
     assert sender.calls == []
@@ -473,7 +473,7 @@ async def test_persistence_failure_prevents_send() -> None:
 
     status = await command_handler.handle(message())
 
-    assert status is SummaryCommandStatus.PERSISTENCE_FAILED
+    assert status is CommandStatus.PERSISTENCE_FAILED
     assert len(service.calls) == 1
     assert repository.results == []
     assert sender.calls == []
@@ -487,7 +487,7 @@ async def test_send_failure_keeps_persisted_summary_and_does_not_regenerate() ->
 
     status = await command_handler.handle(message())
 
-    assert status is SummaryCommandStatus.SEND_FAILED
+    assert status is CommandStatus.SEND_FAILED
     assert len(service.calls) == 1
     assert len(repository.results) == 1
     assert len(sender.calls) == 1

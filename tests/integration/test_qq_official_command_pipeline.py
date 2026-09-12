@@ -15,10 +15,11 @@ from app.services.conversation_query import ConversationQueryService
 from app.services.normalized_message_ingestion import (
     QQOfficialNormalizedMessageIngestionService,
 )
-from app.services.ping_command import PingCommandHandler, PingCommandStatus
+from app.services.command_status import CommandStatus
+from app.services.ping_command import PingCommandHandler
 from app.services.raw_event_ingestion import QQOfficialRawEventIngestionService
 from app.services.summary import SummaryService
-from app.services.summary_command import SummaryCommandHandler, SummaryCommandStatus
+from app.services.summary_command import SummaryCommandHandler
 from app.storage.database import Database
 from app.storage.command_trigger_claim_repository import CommandTriggerClaimRepository
 from app.storage.message_repository import MessageRepository
@@ -138,8 +139,8 @@ async def test_ping_command_routes_group_transport_without_mutating_author(
         assert duplicate is not None
         duplicate_status = await dispatcher.handle(duplicate)
 
-        assert status is PingCommandStatus.SUCCEEDED
-        assert duplicate_status is PingCommandStatus.DUPLICATE
+        assert status is CommandStatus.SUCCEEDED
+        assert duplicate_status is CommandStatus.DUPLICATE
         assert len(await raw_repository.list_recent()) == 2
         assert normalized.context.group_id == "test-group"
         assert normalized.author.user_id == "test-user"
@@ -238,8 +239,8 @@ async def test_summary_command_routes_current_group_only_and_replies_to_trigger_
         assert duplicate_message is not None
         duplicate_status = await dispatcher.handle(duplicate_message)
 
-        assert status is SummaryCommandStatus.SUCCEEDED
-        assert duplicate_status is SummaryCommandStatus.DUPLICATE
+        assert status is CommandStatus.SUCCEEDED
+        assert duplicate_status is CommandStatus.DUPLICATE
         assert command_message.author.user_id == "member-a"
         assert command_message.context.group_id == "group-a"
         assert len(provider.requests) == 1

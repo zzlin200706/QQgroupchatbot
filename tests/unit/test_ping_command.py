@@ -14,9 +14,9 @@ from app.domain.messages import (
     ProvenanceSource,
     TextSegment,
 )
+from app.services.command_status import CommandStatus
 from app.services.ping_command import (
     PingCommandHandler,
-    PingCommandStatus,
     is_ping_command,
 )
 
@@ -122,7 +122,7 @@ async def test_ping_command_sends_pong_to_trigger_group_and_message() -> None:
 
     status = await handler.handle(message())
 
-    assert status is PingCommandStatus.SUCCEEDED
+    assert status is CommandStatus.SUCCEEDED
     assert sender.calls == [("synthetic-group", "pong", "message-1")]
 
 
@@ -142,7 +142,7 @@ async def test_invalid_context_never_sends(candidate: InternalMessage) -> None:
 
     status = await handler.handle(candidate)
 
-    assert status is PingCommandStatus.INVALID_CONTEXT
+    assert status is CommandStatus.INVALID_CONTEXT
     assert sender.calls == []
 
 
@@ -153,7 +153,7 @@ async def test_non_command_is_ignored() -> None:
 
     status = await handler.handle(message("你好"))
 
-    assert status is PingCommandStatus.NOT_COMMAND
+    assert status is CommandStatus.NOT_COMMAND
     assert sender.calls == []
 
 
@@ -164,7 +164,7 @@ async def test_send_failure_is_safe() -> None:
 
     status = await handler.handle(message())
 
-    assert status is PingCommandStatus.SEND_FAILED
+    assert status is CommandStatus.SEND_FAILED
     assert sender.calls == [("synthetic-group", "pong", "message-1")]
 
 
@@ -176,7 +176,7 @@ async def test_duplicate_ping_claim_prevents_second_send() -> None:
 
     status = await handler.handle(message())
 
-    assert status is PingCommandStatus.DUPLICATE
+    assert status is CommandStatus.DUPLICATE
     assert claims.calls == [
         {
             "platform": "qq_official",
@@ -198,5 +198,5 @@ async def test_ping_claim_failure_prevents_send() -> None:
 
     status = await handler.handle(message())
 
-    assert status is PingCommandStatus.PERSISTENCE_FAILED
+    assert status is CommandStatus.PERSISTENCE_FAILED
     assert sender.calls == []

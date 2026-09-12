@@ -19,7 +19,8 @@ from app.services.normalized_message_ingestion import (
 from app.services.image_enrichment import ImageEnrichmentService
 from app.services.raw_event_ingestion import QQOfficialRawEventIngestionService
 from app.services.summary import SummaryService
-from app.services.summary_command import SummaryCommandHandler, SummaryCommandStatus
+from app.services.command_status import CommandStatus
+from app.services.summary_command import SummaryCommandHandler
 from app.storage.database import Database
 from app.storage.message_repository import MessageRepository
 from app.storage.raw_event_repository import RawEventRepository
@@ -149,7 +150,7 @@ async def test_manual_command_closes_generation_persistence_send_loop(
 
         status = await handler.handle(command_message)
 
-        assert status is SummaryCommandStatus.SUCCEEDED
+        assert status is CommandStatus.SUCCEEDED
         assert len(provider.requests) == 1
         prompt = provider.requests[0].user_prompt
         assert "明天按计划进行测试。" in prompt
@@ -261,7 +262,7 @@ async def test_image_history_is_enriched_between_query_and_summary_render(
 
         status = await handler.handle(command)
 
-        assert status is SummaryCommandStatus.SUCCEEDED
+        assert status is CommandStatus.SUCCEEDED
         assert len(provider.requests) == 1
         prompt = provider.requests[0].user_prompt
         assert "谁知道这个报错怎么解决？" in prompt

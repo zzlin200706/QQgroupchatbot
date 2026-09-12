@@ -15,8 +15,7 @@ from app.domain.messages import (
     TextSegment,
 )
 from app.services.command_dispatch import QQOfficialCommandDispatcher
-from app.services.ping_command import PingCommandStatus
-from app.services.summary_command import SummaryCommandStatus
+from app.services.command_status import CommandStatus
 
 
 COMMAND_TIME = datetime(2026, 8, 11, 12, tzinfo=timezone.utc)
@@ -59,18 +58,18 @@ class FakePingHandler:
     def __init__(self) -> None:
         self.calls: list[InternalMessage] = []
 
-    async def handle(self, value: InternalMessage) -> PingCommandStatus:
+    async def handle(self, value: InternalMessage) -> CommandStatus:
         self.calls.append(value)
-        return PingCommandStatus.SUCCEEDED
+        return CommandStatus.SUCCEEDED
 
 
 class FakeSummaryHandler:
     def __init__(self) -> None:
         self.calls: list[InternalMessage] = []
 
-    async def handle(self, value: InternalMessage) -> SummaryCommandStatus:
+    async def handle(self, value: InternalMessage) -> CommandStatus:
         self.calls.append(value)
-        return SummaryCommandStatus.SUCCEEDED
+        return CommandStatus.SUCCEEDED
 
 
 @pytest.mark.asyncio
@@ -83,7 +82,7 @@ async def test_dispatches_ping_without_calling_summary_handler() -> None:
 
     result = await dispatcher.handle(message("#ping"))
 
-    assert result is PingCommandStatus.SUCCEEDED
+    assert result is CommandStatus.SUCCEEDED
     assert len(ping_handler.calls) == 1
     assert summary_handler.calls == []
 
@@ -98,7 +97,7 @@ async def test_dispatches_summary_command_to_summary_handler() -> None:
 
     result = await dispatcher.handle(message("#总结"))
 
-    assert result is SummaryCommandStatus.SUCCEEDED
+    assert result is CommandStatus.SUCCEEDED
     assert ping_handler.calls == []
     assert len(summary_handler.calls) == 1
 
