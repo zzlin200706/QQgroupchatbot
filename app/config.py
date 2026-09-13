@@ -58,6 +58,16 @@ class Settings(BaseSettings):
     # 0 disables pruning.  Pending and running rows are never pruned.
     interaction_outbox_retention_days: int = Field(default=7, ge=0)
 
+    # Retention for raw_events: receipts older than this many days
+    # are pruned on worker startup, subject to FK safety: a row
+    # referenced by any ``messages`` row or by any pending/running
+    # ``interaction_outbox`` row is preserved.  0 disables pruning.
+    raw_events_retention_days: int = Field(default=30, ge=0)
+    # Bound on the per-tx delete batch to keep long-table locks
+    # short.  Chunks are processed in a loop until the table is
+    # caught up to the cutoff.
+    raw_events_prune_chunk_size: int = Field(default=1000, ge=1)
+
     group_assistant_enabled: bool = False
     qa_lookback_minutes: int = Field(default=120, ge=1)
     qa_max_messages: int = Field(default=150, ge=1)

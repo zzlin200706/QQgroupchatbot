@@ -34,7 +34,7 @@ from app.storage.assistant_interaction_repository import AssistantInteractionRep
 from app.storage.interaction_outbox_repository import InteractionOutboxRepository
 from app.storage.message_codec import decode_message
 from app.storage.models import InteractionOutboxRecord, MessageNodeRecord, MessageRecord
-from app.storage.raw_event_repository import RawEventRepository
+from app.storage.raw_event_repository import RawEventRepository  # noqa: F401
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -110,6 +110,33 @@ class InteractionOutboxWorker:
         if deleted:
             logger.info(
                 "qq official outbox pruned terminal rows count=%s retention_days=%s",
+                deleted,
+                retention_days,
+            )
+        return deleted
+
+    async def prune_raw_events(
+        self, retention_days: int, *, chunk_size: int = 1000
+    ) -> int:
+        """Prune ``raw_events`` older than ``retention_days`` safely.
+
+        The operation is idempotent and FK-safe: a row referenced by
+        any ``messages`` row or by any pending/running
+        ``interaction_outbox`` row is never deleted, even if it
+        would otherwise be too old.
+        """
+
+        if retention_days < 0:
+            raise ValueError("retention_days must be non-negative")
+        if retention_days == 0:
+            return 0
+        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+        deleted = await self._raw_event_repository.prune_older_than(
+            older_than=cutoff, chunk_size=chunk_size
+        )
+        if deleted:
+            logger.info(
+                "qq official raw_events pruned count=%s retention_days=%s",
                 deleted,
                 retention_days,
             )
