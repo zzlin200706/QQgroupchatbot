@@ -424,18 +424,26 @@ def _gateway_retry_delay_seconds(
 app = create_app()
 
 
-def _configure_logging(log_level: str) -> None:
+def _configure_logging(log_level: str, *, secrets: tuple[str, ...] = ()) -> None:
     level = getattr(logging, log_level.upper(), logging.INFO)
     root = logging.getLogger()
     if not root.handlers:
         logging.basicConfig(level=level)
     else:
         root.setLevel(level)
+    if secrets:
+        from app.log_redaction import install_secret_redaction
+        install_secret_redaction(secrets)
 
 
 def main() -> None:
     settings = get_settings()
-    _configure_logging(settings.log_level)
+    secrets = (
+        settings.qq_bot_app_secret,
+        settings.deepseek_api_key.get_secret_value(),
+        settings.openai_compatible_api_key.get_secret_value(),
+    )
+    _configure_logging(settings.log_level, secrets=secrets)
     uvicorn.run(app, host=settings.api_host, port=settings.api_port)
 
 
