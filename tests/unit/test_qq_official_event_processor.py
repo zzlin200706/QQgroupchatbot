@@ -352,3 +352,49 @@ async def test_aclose_refuses_new_interactions_and_cancels_running() -> None:
     # After aclose, new events must be refused.
     after_close = await processor.process(inbound_event("#ping"))
     assert after_close.interaction_scheduled is False
+
+
+@pytest.mark.asyncio
+async def test_cancelled_interaction_releases_semaphore() -> None:
+    """Cancelling a long-running interaction must let the next one run."""
+
+    raw = FakeRawIngestion(result=raw_event())
+    normalized = FakeNormalizedIngestion(result=internal_message("#ping"))
+
+    started = asyncio.Event()
+    block = asyncio.Event()
+
+    class BlockingDispatcher(FakeDispatcher):
+        async def handle(self, message):  # type: ignore[override]
+            started.set()
+            await block.wait()
+            return object()
+
+    dispatcher = BlockingDispatcher(interaction_name="ping")
+    processor = QQOfficialEventProcessor(
+        raw_ingestion_service=raw,
+        normalized_ingestion_service=normalized,
+        interaction_dispatcher=dispatcher,
+        max_concurrent_interactions=1,
+    )
+
+    result = await processor.process(inbound_event("#ping"))
+    assert result.interaction_scheduled is True
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    # `aclose` cancels and gathers; afterwards a new event with a fresh
+    # dispatcher must still be schedulable.
+    await processor.aclose()
+
+    block.set()
+    # Reopen the processor (closed state must not affect a new instance).
+    processor2 = QQOfficialEventProcessor(
+        raw_ingestion_service=raw,
+        normalized_ingestion_service=normalized,
+        interaction_dispatcher=FakeDispatcher(interaction_name="ping"),
+        max_concurrent_interactions=1,
+    )
+    second = await processor2.process(inbound_event("#ping"))
+    assert second.interaction_scheduled is True
+    await processor2.drain()
+    await processor2.aclose()
