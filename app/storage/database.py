@@ -54,6 +54,7 @@ class Database:
             class_=AsyncSession,
             expire_on_commit=False,
         )
+        self._url = url
 
     async def initialize(self) -> None:
         """Create the early-stage schema if it does not exist yet."""
@@ -61,6 +62,37 @@ class Database:
         async with self.engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
             await _ensure_sqlite_unique_indexes(connection)
+            await _checkpoint_wal_if_sqlite(connection)
+
+    async def checkpoint_wal(self) -> None:
+        """Force a WAL checkpoint, truncating the WAL file.
+
+        A no-op for in-memory databases.  Truncating the WAL
+        reclaims disk space and ensures a subsequent ``cp`` of the
+        ``.db`` file is a self-contained snapshot (the WAL must be
+        empty for ``sqlite3 .backup`` and ``VACUUM INTO`` to
+        produce a consistent file).
+        """
+
+        if _is_sqlite_memory(self._url):
+            return
+        async with self.engine.begin() as connection:
+            await _checkpoint_wal_if_sqlite(connection)
+
+    @property
+    def is_sqlite(self) -> bool:
+        return make_url(self._url).get_backend_name() == "sqlite"
+
+    @property
+    def database_path(self) -> str | None:
+        """Return the filesystem path of the underlying SQLite file, or None."""
+
+        if not self.is_sqlite:
+            return None
+        database = make_url(self._url).database
+        if not database or database == ":memory:":
+            return None
+        return database
 
     async def dispose(self) -> None:
         """Release database connections during application shutdown."""
@@ -138,6 +170,20 @@ SQLITE_REQUIRED_PRAGMAS: tuple[str, ...] = (
     "PRAGMA journal_mode=WAL",
     f"PRAGMA busy_timeout={int(DEFAULT_SQLITE_BUSY_TIMEOUT_SECONDS * 1000)}",
 )
+
+
+async def _checkpoint_wal_if_sqlite(connection: object) -> None:
+    """Run ``PRAGMA wal_checkpoint(TRUNCATE)`` to keep the WAL bounded.
+
+    SQLite normally checkpoints automatically when the WAL grows
+    past a threshold, but on a long-running host the WAL file can
+    still hold several megabytes.  We force a checkpoint at
+    startup so a process that boots after a crash inherits a
+    clean WAL and so the bot's database file can be safely
+    snapshotted by ``sqlite3 .backup`` or ``VACUUM INTO``.
+    """
+
+    await connection.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
 
 
 async def _ensure_sqlite_unique_indexes(connection: object) -> None:

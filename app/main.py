@@ -339,6 +339,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raw_event_repository=raw_repository,
                 interaction_repository=assistant_interaction_repository,
                 on_handle=interaction_dispatcher.handle,
+                database=database,
                 max_concurrent=app_settings.llm_max_concurrent_interactions,
                 num_workers=1,
                 poll_interval_seconds=0.5,

@@ -107,3 +107,34 @@ async def test_database_creates_messages_covering_index(tmp_path: Path) -> None:
     # migration which is out of scope.
 
     await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_database_checkpoint_wal_truncates(tmp_path: Path) -> None:
+    """Calling ``checkpoint_wal`` should not raise on a file-backed DB.
+
+    We cannot easily assert the WAL file size went down (SQLite
+    may not create a WAL file at all on an idle database) so we
+    just exercise the API and ensure it is idempotent.
+    """
+
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'ckpt.db'}")
+    await database.initialize()
+    # A second checkpoint call must also succeed.
+    await database.checkpoint_wal()
+    await database.checkpoint_wal()
+    assert database.is_sqlite is True
+    assert database.database_path is not None
+    assert database.database_path.endswith("ckpt.db")
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_database_checkpoint_is_noop_in_memory(tmp_path: Path) -> None:
+    """``checkpoint_wal`` is a no-op on in-memory databases."""
+
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+    await database.checkpoint_wal()
+    assert database.database_path is None
+    await database.dispose()

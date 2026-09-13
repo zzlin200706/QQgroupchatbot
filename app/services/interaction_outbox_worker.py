@@ -31,6 +31,7 @@ from typing import Any
 
 from app.domain.messages import InternalMessage
 from app.storage.assistant_interaction_repository import AssistantInteractionRepository
+from app.storage.database import Database
 from app.storage.interaction_outbox_repository import InteractionOutboxRepository
 from app.storage.message_codec import decode_message
 from app.storage.models import InteractionOutboxRecord, MessageNodeRecord, MessageRecord
@@ -56,6 +57,7 @@ class InteractionOutboxWorker:
         raw_event_repository: RawEventRepository,
         interaction_repository: AssistantInteractionRepository | None,
         on_handle: HandleCallable,
+        database: "Database | None" = None,
         max_concurrent: int = 4,
         num_workers: int = 1,
         poll_interval_seconds: float = 0.5,
@@ -72,6 +74,7 @@ class InteractionOutboxWorker:
         self._raw_event_repository = raw_event_repository
         self._interaction_repository = interaction_repository
         self._on_handle = on_handle
+        self._database = database
         self._num_workers = num_workers
         self._poll_interval_seconds = poll_interval_seconds
         self._recover_on_start = recover_on_start
@@ -152,6 +155,14 @@ class InteractionOutboxWorker:
         if self._started:
             return
         self._started = True
+        # Force a WAL checkpoint so the worker starts against a
+        # consistent database file.  Cheap on a quiet system and
+        # bounds the WAL size on a busy one.
+        if self._database is not None:
+            try:
+                await self._database.checkpoint_wal()
+            except Exception:
+                logger.exception("qq official outbox startup checkpoint failed")
         await self.recover()
         for index in range(self._num_workers):
             task = asyncio.create_task(
