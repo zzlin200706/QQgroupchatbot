@@ -144,8 +144,9 @@ async def _ensure_sqlite_unique_indexes(connection: object) -> None:
     """Create UNIQUE indexes that SQLAlchemy did not declare declaratively.
 
     Older deployments of the bot may have been created before the
-    ``raw_events.payload_hash`` UNIQUE constraint was added, so we apply
-    it idempotently here at startup.  ``create_index`` is a no-op when
+    ``raw_events.payload_hash`` UNIQUE constraint or the new
+    ``messages`` covering index were added, so we apply them
+    idempotently here at startup.  ``create_index`` is a no-op when
     the index already exists.
     """
 
@@ -153,5 +154,15 @@ async def _ensure_sqlite_unique_indexes(connection: object) -> None:
         text(
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_raw_events_payload_hash "
             "ON raw_events (platform, payload_hash)"
+        )
+    )
+    # Cover the hot read path used by summary / assistant context.
+    # Older deployments only had ``ix_messages_group_id_timestamp`` so
+    # the platform filter forced a full table scan.  The new index is
+    # a strict superset and is ignored if already present.
+    await connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_messages_platform_group_id_timestamp "
+            "ON messages (platform, group_id, timestamp)"
         )
     )

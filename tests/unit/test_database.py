@@ -83,3 +83,27 @@ async def test_database_disposes_engine_without_runtimeerror(tmp_path: Path) -> 
     await database.dispose()
     # Double dispose is a no-op rather than an error.
     await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_database_creates_messages_covering_index(tmp_path: Path) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'idx.db'}")
+    await database.initialize()
+
+    async with database.engine.connect() as connection:
+        indexes = (
+            await connection.execute(
+                text(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='index' AND tbl_name='messages'"
+                )
+            )
+        ).all()
+
+    names = {row[0] for row in indexes}
+    assert "ix_messages_platform_group_id_timestamp" in names
+    # The legacy index from older deployments is also kept; it is
+    # unused by the new planner but removing it would require a
+    # migration which is out of scope.
+
+    await database.dispose()

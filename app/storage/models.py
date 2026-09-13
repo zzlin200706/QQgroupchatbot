@@ -84,7 +84,12 @@ class MessageRecord(Base):
             name="uq_messages_raw_parser_version",
         ),
         Index("ix_messages_source_raw_event_id", "source_raw_event_id"),
-        Index("ix_messages_group_id_timestamp", "group_id", "timestamp"),
+        Index(
+            "ix_messages_platform_group_id_timestamp",
+            "platform",
+            "group_id",
+            "timestamp",
+        ),
         Index("ix_messages_platform_message_id", "platform", "platform_message_id"),
     )
 
