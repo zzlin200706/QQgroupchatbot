@@ -27,13 +27,18 @@ class Settings(BaseSettings):
 
     deepseek_api_key: SecretStr = SecretStr("")
     deepseek_base_url: str = "https://api.deepseek.com"
-    deepseek_model: str = "deepseek-v4-flash"
+    # Empty by default: the operator must choose a model explicitly.
+    # The validator below refuses to enable the deepseek provider
+    # without a non-empty model name.
+    deepseek_model: str = ""
     deepseek_timeout_seconds: float = Field(default=60.0, gt=0)
     deepseek_max_retries: int = Field(default=2, ge=0)
 
     openai_compatible_api_key: SecretStr = SecretStr("")
     openai_compatible_base_url: str = ""
-    openai_compatible_model: str = "gpt-5.6-luna"
+    # Same rationale as ``deepseek_model``: explicit operator choice
+    # is required when the provider is enabled.
+    openai_compatible_model: str = ""
     openai_compatible_timeout_seconds: float = Field(default=60.0, gt=0)
     openai_compatible_max_retries: int = Field(default=2, ge=0)
 
@@ -117,6 +122,11 @@ class Settings(BaseSettings):
                         "DEEPSEEK_API_KEY is required when "
                         "SUMMARY_COMMAND_ENABLED or GROUP_ASSISTANT_ENABLED is true"
                     )
+                if not self.deepseek_model:
+                    raise ValueError(
+                        "DEEPSEEK_MODEL is required when "
+                        "SUMMARY_COMMAND_ENABLED or GROUP_ASSISTANT_ENABLED is true"
+                    )
             else:  # openai_compatible
                 if not self.openai_compatible_api_key.get_secret_value():
                     raise ValueError(
@@ -126,6 +136,11 @@ class Settings(BaseSettings):
                 if not self.openai_compatible_base_url:
                     raise ValueError(
                         "OPENAI_COMPATIBLE_BASE_URL is required when "
+                        "SUMMARY_COMMAND_ENABLED or GROUP_ASSISTANT_ENABLED is true"
+                    )
+                if not self.openai_compatible_model:
+                    raise ValueError(
+                        "OPENAI_COMPATIBLE_MODEL is required when "
                         "SUMMARY_COMMAND_ENABLED or GROUP_ASSISTANT_ENABLED is true"
                     )
 
@@ -157,6 +172,84 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    def audit(self) -> dict[str, object]:
+        """Return a secret-free snapshot of the configuration for logging.
+
+        Use this in the startup banner so an operator can audit the
+        effective configuration without leaking credentials.
+        """
+
+        return {
+            "app_env": self.app_env,
+            "log_level": self.log_level,
+            "llm_provider": self.llm_provider,
+            "llm_max_output_tokens": self.llm_max_output_tokens,
+            "llm_max_concurrent_interactions": self.llm_max_concurrent_interactions,
+            "qq_event_transport": self.qq_event_transport,
+            "qq_api_timeout_seconds": self.qq_api_timeout_seconds,
+            "qq_gateway_reconnect_initial_delay_seconds": (
+                self.qq_gateway_reconnect_initial_delay_seconds
+            ),
+            "qq_gateway_reconnect_max_delay_seconds": (
+                self.qq_gateway_reconnect_max_delay_seconds
+            ),
+            "qq_shutdown_drain_timeout_seconds": (
+                self.qq_shutdown_drain_timeout_seconds
+            ),
+            "qq_bot_app_id_configured": bool(self.qq_bot_app_id.strip()),
+            "qq_bot_app_secret_configured": bool(self.qq_bot_app_secret.strip()),
+            "database_url": "<redacted>",
+            "deepseek_api_key_configured": bool(
+                self.deepseek_api_key.get_secret_value().strip()
+            ),
+            "deepseek_base_url": self.deepseek_base_url,
+            "deepseek_model": self.deepseek_model or "<unset>",
+            "deepseek_timeout_seconds": self.deepseek_timeout_seconds,
+            "deepseek_max_retries": self.deepseek_max_retries,
+            "openai_compatible_api_key_configured": bool(
+                self.openai_compatible_api_key.get_secret_value().strip()
+            ),
+            "openai_compatible_base_url": self.openai_compatible_base_url
+            or "<unset>",
+            "openai_compatible_model": self.openai_compatible_model or "<unset>",
+            "openai_compatible_timeout_seconds": self.openai_compatible_timeout_seconds,
+            "openai_compatible_max_retries": self.openai_compatible_max_retries,
+            "vision_enabled": self.vision_enabled,
+            "vision_provider": self.vision_provider,
+            "vision_model": self.vision_model or "<unset>",
+            "image_download_timeout_seconds": self.image_download_timeout_seconds,
+            "image_max_bytes": self.image_max_bytes,
+            "summary_max_messages": self.summary_max_messages,
+            "summary_max_input_chars": self.summary_max_input_chars,
+            "summary_command_enabled": self.summary_command_enabled,
+            "summary_command_lookback_minutes": (
+                self.summary_command_lookback_minutes
+            ),
+            "summary_command_cooldown_seconds": (
+                self.summary_command_cooldown_seconds
+            ),
+            "group_assistant_enabled": self.group_assistant_enabled,
+            "qa_lookback_minutes": self.qa_lookback_minutes,
+            "qa_max_messages": self.qa_max_messages,
+            "chat_lookback_minutes": self.chat_lookback_minutes,
+            "chat_max_messages": self.chat_max_messages,
+            "chat_max_assistant_turns": self.chat_max_assistant_turns,
+            "assistant_max_input_chars": self.assistant_max_input_chars,
+            "assistant_max_output_tokens": self.assistant_max_output_tokens,
+            "assistant_max_output_chars": self.assistant_max_output_chars,
+            "assistant_cooldown_seconds": self.assistant_cooldown_seconds,
+            "forward_max_depth": self.forward_max_depth,
+            "forward_max_nodes": self.forward_max_nodes,
+            "message_max_segments": self.message_max_segments,
+            "interaction_outbox_retention_days": (
+                self.interaction_outbox_retention_days
+            ),
+            "raw_events_retention_days": self.raw_events_retention_days,
+            "raw_events_prune_chunk_size": self.raw_events_prune_chunk_size,
+            "api_host": self.api_host,
+            "api_port": self.api_port,
+        }
 
 
 @lru_cache

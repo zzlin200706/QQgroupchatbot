@@ -19,11 +19,13 @@ def test_phase_h_defaults_and_secret_redaction() -> None:
     assert settings.qq_gateway_reconnect_initial_delay_seconds == 1
     assert settings.qq_gateway_reconnect_max_delay_seconds == 30
     assert settings.deepseek_base_url == "https://api.deepseek.com"
-    assert settings.deepseek_model == "deepseek-v4-flash"
+    # Model names are explicit operator choice; the default is empty
+    # so a production deployment must set DEEPSEEK_MODEL.
+    assert settings.deepseek_model == ""
     assert settings.deepseek_timeout_seconds == 60
     assert settings.deepseek_max_retries == 2
     assert settings.openai_compatible_base_url == ""
-    assert settings.openai_compatible_model == "gpt-5.6-luna"
+    assert settings.openai_compatible_model == ""
     assert settings.openai_compatible_timeout_seconds == 60
     assert settings.openai_compatible_max_retries == 2
     assert settings.vision_enabled is False
@@ -108,3 +110,33 @@ def test_settings_validator_still_enforces_credentials_in_production() -> None:
             summary_command_enabled=True,
         )
     assert "DEEPSEEK_API_KEY" in str(caught.value)
+
+
+def test_audit_returns_secret_free_snapshot() -> None:
+    settings = Settings(
+        _env_file=None,
+        deepseek_api_key="private-deepseek",
+        openai_compatible_api_key="private-relay",
+    )
+
+    snapshot = settings.audit()
+    rendered = repr(snapshot)
+    assert "private-deepseek" not in rendered
+    assert "private-relay" not in rendered
+    assert snapshot["deepseek_api_key_configured"] is True
+    assert snapshot["openai_compatible_api_key_configured"] is True
+    assert snapshot["deepseek_model"] == "<unset>"
+    assert snapshot["openai_compatible_model"] == "<unset>"
+    assert snapshot["database_url"] == "<redacted>"
+
+
+def test_audit_reports_unset_model_when_empty() -> None:
+    settings = Settings(
+        _env_file=None,
+        deepseek_model="deepseek-chat",
+        openai_compatible_model="gpt-x",
+    )
+
+    snapshot = settings.audit()
+    assert snapshot["deepseek_model"] == "deepseek-chat"
+    assert snapshot["openai_compatible_model"] == "gpt-x"

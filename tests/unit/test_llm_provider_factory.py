@@ -19,6 +19,7 @@ async def test_creates_deepseek_provider_from_settings() -> None:
             _env_file=None,
             llm_provider="deepseek",
             deepseek_api_key="test-key",
+            deepseek_model="deepseek-chat",
         )
     )
     try:
@@ -85,6 +86,7 @@ async def test_deepseek_text_uses_separate_openai_vision_provider() -> None:
         _env_file=None,
         llm_provider="deepseek",
         deepseek_api_key="test-deepseek-key",
+        deepseek_model="deepseek-chat",
         openai_compatible_api_key="test-vision-key",
         openai_compatible_base_url="https://relay.example/v1",
         vision_enabled=True,
