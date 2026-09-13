@@ -26,8 +26,12 @@ from app.services.summary import (
     EMPTY_SUMMARY,
     SUMMARY_PROMPT_VERSION,
     SUMMARY_SYSTEM_PROMPT,
+    SYNTHESIS_SYSTEM_PROMPT,
     SummaryService,
     SummaryWindowTooLarge,
+    _fallback_payload,
+    _split_messages,
+    _union_payloads,
 )
 from app.services.image_enrichment import ImageEnrichmentService
 
@@ -55,6 +59,28 @@ class FakeProvider:
     async def complete(self, request: LLMRequest) -> LLMResponse:
         self.requests.append(request)
         return self.response
+
+
+class SequencedProvider:
+    """Provider that returns a different response per call.
+
+    Used to exercise the chunked-summarization path where the service
+    issues N+1 calls (one per chunk plus a final synthesis call).
+    """
+
+    def __init__(self, responses: list[LLMResponse]) -> None:
+        if not responses:
+            raise ValueError("SequencedProvider requires at least one response")
+        self._responses = list(responses)
+        self.requests: list[LLMRequest] = []
+
+    async def complete(self, request: LLMRequest) -> LLMResponse:
+        self.requests.append(request)
+        index = len(self.requests) - 1
+        if index < len(self._responses):
+            return self._responses[index]
+        # Reuse the last prepared response for any extra calls.
+        return self._responses[-1]
 
 
 def known(name: str, user_id: str) -> IdentityRef:
@@ -119,6 +145,26 @@ def successful_response(content: str | None = None) -> LLMResponse:
         finish_reason="stop",
         usage=LLMUsage(prompt_tokens=100, completion_tokens=50, total_tokens=150),
     )
+
+
+def chunk_payload_response(
+    *,
+    summary: str,
+    topics: tuple[str, ...] = (),
+    key_points: tuple[str, ...] = (),
+    decisions: tuple[str, ...] = (),
+    action_items: tuple[dict, ...] = (),
+    open_questions: tuple[str, ...] = (),
+) -> LLMResponse:
+    payload = {
+        "summary": summary,
+        "topics": list(topics),
+        "key_points": list(key_points),
+        "decisions": list(decisions),
+        "action_items": list(action_items),
+        "open_questions": list(open_questions),
+    }
+    return successful_response(json.dumps(payload, ensure_ascii=False))
 
 
 def service(
@@ -247,7 +293,16 @@ async def test_message_overflow_is_detected_without_partial_summary() -> None:
 
 
 @pytest.mark.asyncio
-async def test_character_overflow_is_not_silently_truncated() -> None:
+async def test_character_overflow_uses_chunked_summarization() -> None:
+    """A long window never gets silently truncated.
+
+    v1.1 replaced the v1.0 ``SummaryWindowTooLarge`` raise with a
+    two-stage extract-then-synthesize pipeline.  A single chunk whose
+    rendered text still exceeds ``max_input_chars`` is degraded into
+    a documented stub (no LLM call for that chunk) and the synthesis
+    call is the only one that reaches the provider.
+    """
+
     provider = FakeProvider()
     summary_service, _ = service(
         (internal_message("long conversation", raw_event_id=1),),
@@ -255,15 +310,24 @@ async def test_character_overflow_is_not_silently_truncated() -> None:
         max_input_chars=10,
     )
 
-    with pytest.raises(SummaryWindowTooLarge, match="character limit"):
-        await summary_service.summarize(
-            platform="qq_official",
-            group_id=GROUP_ID,
-            start_time=START,
-            end_time=END,
-        )
+    result = await summary_service.summarize(
+        platform="qq_official",
+        group_id=GROUP_ID,
+        start_time=START,
+        end_time=END,
+    )
 
-    assert provider.requests == []
+    # No silent truncation: a real SummaryResult is produced.
+    assert result.message_count == 1
+    # The original chunk became a stub, so the only LLM call is the
+    # synthesis step.  The stub does not feed the rendered chat text
+    # back into the LLM; only the placeholder phrase is sent.
+    assert len(provider.requests) == 1
+    synthesis_request = provider.requests[0]
+    assert synthesis_request.json_output is True
+    assert "第 1 段摘要不可用" in synthesis_request.user_prompt
+    assert "long conversation" not in synthesis_request.user_prompt
+    assert "RAW-QQ-ID" not in synthesis_request.user_prompt
 
 
 def test_summary_service_rejects_a_truncating_renderer() -> None:
@@ -486,3 +550,367 @@ async def test_summary_prompt_includes_text_and_mocked_image_description() -> No
     assert "谁知道这个报错怎么解决？" in prompt
     assert "ModuleNotFoundError" in prompt
     assert "private.invalid" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# Chunked summarization path tests
+# ---------------------------------------------------------------------------
+
+
+def _conversation(messages: int) -> tuple[InternalMessage, ...]:
+    return tuple(
+        internal_message(
+            f"message body {index} — repeats to make the rendered text long enough",
+            raw_event_id=index,
+        )
+        for index in range(1, messages + 1)
+    )
+
+
+def _short_conversation(messages: int) -> tuple[InternalMessage, ...]:
+    """Produce a conversation whose rendered text grows ~41 chars per message."""
+
+    return tuple(
+        internal_message(f"msg {index}", raw_event_id=index)
+        for index in range(1, messages + 1)
+    )
+
+
+@pytest.mark.asyncio
+async def test_chunked_path_splits_messages_and_invokes_synthesis() -> None:
+    """A long window is split into N chunks plus a final synthesis call."""
+
+    chunk_summary_a = chunk_payload_response(
+        summary="第一段总结：项目背景介绍。",
+        topics=["项目背景"],
+        key_points=["团队从北京开始"],
+        decisions=[],
+        action_items=[],
+    )
+    chunk_summary_b = chunk_payload_response(
+        summary="第二段总结：当前进度同步。",
+        topics=["当前进度"],
+        key_points=["完成接口定义"],
+        decisions=["接口走 v2"],
+        action_items=(
+            {"description": "提交 PR", "owner": "Carol", "deadline": "周五"},
+        ),
+    )
+    final = chunk_payload_response(
+        summary="项目从北京开始，本周完成接口定义并决定走 v2。",
+        topics=["项目背景", "当前进度"],
+        key_points=["团队从北京开始", "完成接口定义"],
+        decisions=["接口走 v2"],
+        action_items=(
+            {"description": "提交 PR", "owner": "Carol", "deadline": "周五"},
+        ),
+    )
+    provider = SequencedProvider([chunk_summary_a, chunk_summary_b, final])
+    # 20 short messages ~ 820 chars; with chunk_messages=10 each
+    # chunk ~ 410 chars, fitting under max_input_chars=500.
+    summary_service, _ = service(
+        _short_conversation(20), provider, max_input_chars=500, chunk_messages=10
+    )
+
+    result = await summary_service.summarize(
+        platform="qq_official",
+        group_id=GROUP_ID,
+        start_time=START,
+        end_time=END,
+    )
+
+    assert result.message_count == 20
+    assert result.summary == "项目从北京开始，本周完成接口定义并决定走 v2。"
+    # 2 chunk requests + 1 synthesis request.
+    assert len(provider.requests) == 3
+    chunk_a, chunk_b, synthesis = provider.requests
+    assert chunk_a.system_prompt == SUMMARY_SYSTEM_PROMPT
+    assert chunk_b.system_prompt == SUMMARY_SYSTEM_PROMPT
+    assert synthesis.system_prompt == SYNTHESIS_SYSTEM_PROMPT
+    assert "10" in chunk_a.user_prompt  # chunk size is reflected
+    assert "10" in chunk_b.user_prompt
+    assert "[第 1 段摘要]" in synthesis.user_prompt
+    assert "[第 2 段摘要]" in synthesis.user_prompt
+
+
+@pytest.mark.asyncio
+async def test_chunk_failure_is_isolated_and_synthesis_still_runs() -> None:
+    """If one chunk's JSON is malformed, it is replaced with a stub."""
+
+    bad_chunk = successful_response("not-a-json")
+    good_chunk = chunk_payload_response(summary="第二段总结：一切正常。")
+    final = chunk_payload_response(summary="仅第二段可用。")
+    provider = SequencedProvider([bad_chunk, good_chunk, final])
+    summary_service, _ = service(
+        _short_conversation(20), provider, max_input_chars=500, chunk_messages=10
+    )
+
+    result = await summary_service.summarize(
+        platform="qq_official",
+        group_id=GROUP_ID,
+        start_time=START,
+        end_time=END,
+    )
+
+    assert result.message_count == 20
+    # Provider was still called for the bad chunk — the failure
+    # surfaces only as a stub for the synthesis step.
+    assert len(provider.requests) == 3
+    assert "第 1 段摘要不可用" in provider.requests[-1].user_prompt
+    assert "第二段总结" in provider.requests[-1].user_prompt
+
+
+@pytest.mark.asyncio
+async def test_synthesis_failure_unions_chunk_payloads() -> None:
+    """If the synthesis call returns invalid JSON, fall back to a union of chunks."""
+
+    chunk_a = chunk_payload_response(
+        summary="第一段：确认了发布日期。",
+        topics=["发布"],
+        key_points=["周五发布"],
+        decisions=("周五发布",),
+        action_items=(
+            {"description": "通知运营", "owner": None, "deadline": "周三"},
+        ),
+    )
+    chunk_b = chunk_payload_response(
+        summary="第二段：补充了技术细节。",
+        topics=["发布", "技术"],
+        key_points=["周五发布", "蓝绿部署"],
+        decisions=("周五发布", "蓝绿部署"),
+        action_items=(
+            {"description": "通知运营", "owner": None, "deadline": "周三"},
+            {"description": "写部署脚本", "owner": "Dan", "deadline": None},
+        ),
+    )
+    bad_synthesis = successful_response("{ not-json")
+    provider = SequencedProvider([chunk_a, chunk_b, bad_synthesis])
+    summary_service, _ = service(
+        _short_conversation(20), provider, max_input_chars=500, chunk_messages=10
+    )
+
+    result = await summary_service.summarize(
+        platform="qq_official",
+        group_id=GROUP_ID,
+        start_time=START,
+        end_time=END,
+    )
+
+    assert result.message_count == 20
+    # Summary is the union of the chunk summaries, joined by newline.
+    assert "第一段：确认了发布日期。" in result.summary
+    assert "第二段：补充了技术细节。" in result.summary
+    # Duplicates collapsed.
+    assert result.topics == ("发布", "技术")
+    assert result.key_points == ("周五发布", "蓝绿部署")
+    assert result.decisions == ("周五发布", "蓝绿部署")
+    # Action items deduplicated by (description, owner, deadline).
+    assert len(result.action_items) == 2
+    descriptions = {item.description for item in result.action_items}
+    assert descriptions == {"通知运营", "写部署脚本"}
+
+
+@pytest.mark.asyncio
+async def test_oversized_single_chunk_degrades_to_stub_without_provider_call() -> None:
+    """A chunk whose rendered text exceeds the limit becomes a stub.
+
+    The provider is *not* called for that chunk — only the synthesis
+    call reaches the provider.  This keeps the rendered chat text out
+    of the LLM context entirely.
+    """
+
+    long_message_count = 10
+    # Use long-text messages so 5 per chunk blow past 200 chars.
+    final = chunk_payload_response(summary="所有分段都不可用，仅留占位。")
+    provider = SequencedProvider([final])
+    summary_service = SummaryService(
+        query_service=FakeQueryService(_conversation(long_message_count)),  # type: ignore[arg-type]
+        renderer=MessageRenderer(),
+        provider=provider,
+        max_input_chars=200,
+        chunk_messages=5,
+    )
+
+    result = await summary_service.summarize(
+        platform="qq_official",
+        group_id=GROUP_ID,
+        start_time=START,
+        end_time=END,
+    )
+
+    assert result.message_count == long_message_count
+    # Only the synthesis call reaches the provider.
+    assert len(provider.requests) == 1
+    synthesis = provider.requests[0]
+    assert synthesis.system_prompt == SYNTHESIS_SYSTEM_PROMPT
+    assert synthesis.user_prompt.count("不可用") == 2
+    # The chat text must not appear in the synthesis prompt.
+    assert "message body" not in synthesis.user_prompt
+
+
+@pytest.mark.asyncio
+async def test_chunked_path_renders_image_description_without_raw_metadata() -> None:
+    """Image messages in a chunked window are described and stay isolated."""
+
+    segments = (
+        TextSegment(position=0, text="看这个错误", raw_data={"raw": "看这个错误"}),
+        ImageSegment(
+            position=1,
+            raw_data={"url": "https://private.invalid/image"},
+            file="traceback.png",
+            url="https://media.example.test/traceback.png",
+            summary=None,
+            sub_type=None,
+            file_size=100,
+            content_type="image/png",
+            width=800,
+            height=600,
+        ),
+    )
+    image_message = InternalMessage(
+        platform="qq_official",
+        source_raw_event_id=1,
+        platform_message_id="PRIVATE-MESSAGE-ID-1",
+        context=MessageContext(message_type="group", sub_type=None, group_id=GROUP_ID),
+        actor=known("Alice", "RAW-QQ-ID-1001"),
+        author=known("Alice", "RAW-QQ-ID-1001"),
+        timestamp=START,
+        segments=segments,
+        provenance=MessageProvenance(
+            source_type=ProvenanceSource.DIRECT_EVENT,
+            raw_event_id=1,
+        ),
+    )
+    # 19 short text messages so we get 2 chunks of 10 each.
+    padding = _short_conversation(19)
+    messages = (image_message,) + padding
+
+    class Resolver:
+        async def resolve(self, image: ImageSegment) -> ResolvedImage:
+            return ResolvedImage(data=b"mock-png", content_type="image/png")
+
+    class Vision:
+        @property
+        def supports_vision(self) -> bool:
+            return True
+
+        async def describe_image(
+            self, image: ResolvedImage, *, prompt: str
+        ) -> ImageDescription:
+            return ImageDescription(description="ModuleNotFoundError traceback")
+
+    chunk_responses = [
+        chunk_payload_response(summary=f"分段 {n} 摘要")
+        for n in (1, 2)
+    ]
+    chunk_responses.append(chunk_payload_response(summary="整体摘要"))
+    provider = SequencedProvider(chunk_responses)
+    summary_service = SummaryService(
+        query_service=FakeQueryService(messages),  # type: ignore[arg-type]
+        renderer=MessageRenderer(),
+        provider=provider,
+        max_input_chars=500,
+        chunk_messages=10,
+        image_enrichment_service=ImageEnrichmentService(
+            enabled=True,
+            resolver=Resolver(),
+            provider=Vision(),
+        ),
+    )
+
+    result = await summary_service.summarize(
+        platform="qq_official",
+        group_id=GROUP_ID,
+        start_time=START,
+        end_time=END,
+    )
+
+    assert result.message_count == 20
+    # The chunk that contained the image should have the description
+    # in its user prompt; the raw URL and file must never leak.
+    chunk_with_image = provider.requests[0]
+    assert "ModuleNotFoundError" in chunk_with_image.user_prompt
+    assert "private.invalid" not in chunk_with_image.user_prompt
+    assert "traceback.png" not in chunk_with_image.user_prompt
+    assert "RAW-QQ-ID-1001" not in chunk_with_image.user_prompt
+
+
+@pytest.mark.asyncio
+async def test_chunked_path_preserves_total_message_count_in_synthesis_result() -> None:
+    """The synthesis ``SummaryResult`` must report the true message count."""
+
+    chunk_a = chunk_payload_response(summary="A")
+    chunk_b = chunk_payload_response(summary="B")
+    final = chunk_payload_response(summary="AB")
+    provider = SequencedProvider([chunk_a, chunk_b, final])
+    # 50 messages, chunked in pairs of 25 — total > per-chunk.
+    summary_service, _ = service(
+        _short_conversation(50), provider, max_input_chars=1200, chunk_messages=25
+    )
+
+    result = await summary_service.summarize(
+        platform="qq_official",
+        group_id=GROUP_ID,
+        start_time=START,
+        end_time=END,
+    )
+
+    assert result.message_count == 50  # not 2 (number of chunks)
+
+
+def test_split_messages_partitions_input_non_overlapping() -> None:
+    messages = _conversation(7)
+    chunks = _split_messages(messages, 3)
+    assert [len(c) for c in chunks] == [3, 3, 1]
+    # Reconstructed messages must equal the original in order.
+    flattened: list[InternalMessage] = []
+    for chunk in chunks:
+        flattened.extend(chunk)
+    assert flattened == list(messages)
+
+
+def test_split_messages_returns_empty_for_empty_input() -> None:
+    assert _split_messages((), 10) == []
+
+
+def test_split_messages_rejects_non_positive_size() -> None:
+    with pytest.raises(ValueError, match="at least one"):
+        _split_messages(_conversation(2), 0)
+
+
+def test_fallback_payload_does_not_embed_rendered_text() -> None:
+    payload = _fallback_payload(
+        "this chat text must never re-enter the LLM",
+        chunk_index=3,
+    )
+    assert "第 3 段摘要不可用" in payload.summary
+    assert "this chat text" not in payload.summary
+    assert payload.topics == []
+    assert payload.action_items == []
+
+
+def test_union_payloads_deduplicates_lists_and_concatenates_summary() -> None:
+    from app.services.summary import _SummaryPayload
+
+    a = _SummaryPayload(
+        summary="first",
+        topics=["x", "y"],
+        key_points=["p1", "p2"],
+        decisions=["d"],
+        action_items=[],
+        open_questions=["q1"],
+    )
+    b = _SummaryPayload(
+        summary="second",
+        topics=["y", "z"],
+        key_points=["p2", "p3"],
+        decisions=["d", "d2"],
+        action_items=[],
+        open_questions=["q1", "q2"],
+    )
+    union = _union_payloads([a, b])
+    assert union.summary == "first\nsecond"
+    assert union.topics == ["x", "y", "z"]
+    assert union.key_points == ["p1", "p2", "p3"]
+    assert union.decisions == ["d", "d2"]
+    assert union.open_questions == ["q1", "q2"]

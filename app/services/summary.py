@@ -53,6 +53,14 @@ SUMMARY_SYSTEM_PROMPT = """你是群聊记录摘要器。
 当责任人或截止日期没有明确依据时，对应字段必须是 JSON null。"""
 
 
+SYNTHESIS_SYSTEM_PROMPT = """你是群聊记录摘要合并器。
+下面是同一时间范围内按顺序的若干分段摘要。
+请将它们合并为一段最终摘要，保留所有重要信息、明确形成的决定、待办、开放问题。
+严格只输出符合 system prompt 指定 schema 的 JSON object，不要输出 Markdown 或额外说明。
+如果分段摘要之间存在冲突，请在 summary 字段注明'分段摘要存在冲突'。
+如果某段只是“不可用”的占位符，请在最终摘要中如实保留这一信息，不要捏造内容。"""
+
+
 class SummaryWindowTooLarge(Exception):
     """The requested window cannot be summarized with complete coverage."""
 
@@ -77,7 +85,17 @@ class _SummaryPayload(BaseModel):
 
 
 class SummaryService:
-    """Query, render, complete, and validate one bounded summary window."""
+    """Query, render, complete, and validate one bounded summary window.
+
+    For windows whose rendered conversation exceeds the configured
+    ``max_input_chars`` the service uses a two-stage
+    extract-then-synthesize pipeline: split the conversation into
+    message-bounded chunks, summarize each, then ask the provider
+    to merge the chunk summaries into a final result.  The single
+    message_count limit (``max_messages``) is still hard.
+    """
+
+    DEFAULT_CHUNK_MESSAGES = 80
 
     def __init__(
         self,
@@ -89,6 +107,7 @@ class SummaryService:
         max_messages: int = 500,
         max_input_chars: int = 120000,
         max_output_tokens: int = 4096,
+        chunk_messages: int | None = None,
     ) -> None:
         if max_messages < 1:
             raise ValueError("max_messages must be at least one")
@@ -96,6 +115,12 @@ class SummaryService:
             raise ValueError("max_input_chars must be at least one")
         if max_output_tokens < 1:
             raise ValueError("max_output_tokens must be at least one")
+        if chunk_messages is None:
+            chunk_messages = min(SummaryService.DEFAULT_CHUNK_MESSAGES, max_messages)
+        elif chunk_messages < 1 or chunk_messages > max_messages:
+            raise ValueError(
+                "chunk_messages must be in [1, max_messages]"
+            )
         if renderer.max_chars is not None:
             raise ValueError("summary renderer must not truncate conversation text")
         self._query_service = query_service
@@ -105,6 +130,7 @@ class SummaryService:
         self._max_messages = max_messages
         self._max_input_chars = max_input_chars
         self._max_output_tokens = max_output_tokens
+        self._chunk_messages = chunk_messages
 
     async def summarize(
         self,
@@ -144,18 +170,81 @@ class SummaryService:
             messages = await self._image_enrichment_service.enrich_messages(messages)
         rendered = self._renderer.render_conversation(messages)
         input_chars = len(rendered)
-        if input_chars > self._max_input_chars:
-            raise SummaryWindowTooLarge(
-                "rendered conversation exceeds the configured character limit"
+        if input_chars <= self._max_input_chars:
+            return await self._final_summarize(
+                start_time=start_time,
+                end_time=end_time,
+                message_count=len(messages),
+                rendered=rendered,
+                input_chars=input_chars,
+                platform=platform,
+                group_id=group_id,
             )
 
+        # Long window: split by message count, summarize each
+        # chunk, then synthesize.
+        chunks = _split_messages(messages, self._chunk_messages)
+        chunk_payloads: list[_SummaryPayload] = []
+        for index, chunk in enumerate(chunks, start=1):
+            rendered_chunk = self._renderer.render_conversation(chunk)
+            if len(rendered_chunk) > self._max_input_chars:
+                # A single chunk is still too large: degrade the
+                # chunk into a brief text-only stub so the synthesis
+                # step has *something* to work with.
+                chunk_payloads.append(
+                    _fallback_payload(rendered_chunk, chunk_index=index)
+                )
+                continue
+            response = await self._provider.complete(
+                LLMRequest(
+                    system_prompt=SUMMARY_SYSTEM_PROMPT,
+                    user_prompt=_user_prompt(
+                        start_time=chunk[0].timestamp or start_time,
+                        end_time=chunk[-1].timestamp or end_time,
+                        message_count=len(chunk),
+                        rendered=rendered_chunk,
+                    ),
+                    max_output_tokens=self._max_output_tokens,
+                    json_output=True,
+                )
+            )
+            try:
+                chunk_payloads.append(_validate_summary_payload(response))
+            except LLMInvalidResponseError:
+                # A single chunk may fail (transient provider error
+                # or partial JSON).  Replace with a stub so the
+                # synthesis step still runs.
+                chunk_payloads.append(
+                    _fallback_payload(rendered_chunk, chunk_index=index)
+                )
+        synthesis = await self._synthesize(
+            platform=platform,
+            group_id=group_id,
+            start_time=start_time,
+            end_time=end_time,
+            message_count=len(messages),
+            chunk_payloads=chunk_payloads,
+        )
+        return synthesis
+
+    async def _final_summarize(
+        self,
+        *,
+        platform: str,
+        group_id: str,
+        start_time: datetime,
+        end_time: datetime,
+        message_count: int,
+        rendered: str,
+        input_chars: int,
+    ) -> SummaryResult:
         response = await self._provider.complete(
             LLMRequest(
                 system_prompt=SUMMARY_SYSTEM_PROMPT,
                 user_prompt=_user_prompt(
                     start_time=start_time,
                     end_time=end_time,
-                    message_count=len(messages),
+                    message_count=message_count,
                     rendered=rendered,
                 ),
                 max_output_tokens=self._max_output_tokens,
@@ -169,7 +258,7 @@ class SummaryService:
             group_id=group_id,
             start_time=start_time,
             end_time=end_time,
-            message_count=len(messages),
+            message_count=message_count,
             summary=payload.summary,
             topics=tuple(payload.topics),
             key_points=tuple(payload.key_points),
@@ -187,6 +276,78 @@ class SummaryService:
             model=response.model,
             finish_reason=response.finish_reason,
             input_chars=input_chars,
+            prompt_version=SUMMARY_PROMPT_VERSION,
+            prompt_tokens=None if usage is None else usage.prompt_tokens,
+            completion_tokens=None if usage is None else usage.completion_tokens,
+            total_tokens=None if usage is None else usage.total_tokens,
+        )
+
+    async def _synthesize(
+        self,
+        *,
+        platform: str,
+        group_id: str,
+        start_time: datetime,
+        end_time: datetime,
+        message_count: int,
+        chunk_payloads: list[_SummaryPayload],
+    ) -> SummaryResult:
+        """Ask the provider to merge chunk summaries into one final result.
+
+        ``message_count`` is the original number of messages in the
+        window; the synthesis call only sees chunk summaries, but the
+        persisted ``SummaryResult`` must still report the true count so
+        callers and audit logs are not misled.
+        """
+
+        rendered_chunks = "\n\n".join(
+            f"[第 {index} 段摘要]\n{payload.summary}"
+            for index, payload in enumerate(chunk_payloads, start=1)
+        )
+        user_prompt = (
+            f"时间范围:\n{start_time.astimezone(timezone.utc).isoformat()}\n到\n"
+            f"{end_time.astimezone(timezone.utc).isoformat()}\n\n"
+            f"共 {len(chunk_payloads)} 段分段摘要:\n{rendered_chunks}"
+        )
+        response = await self._provider.complete(
+            LLMRequest(
+                system_prompt=SYNTHESIS_SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+                max_output_tokens=self._max_output_tokens,
+                json_output=True,
+            )
+        )
+        try:
+            payload = _validate_summary_payload(response)
+        except LLMInvalidResponseError:
+            # If the synthesis step itself fails, return the union of
+            # the chunk payloads so the operator still gets *something*
+            # rather than a CommandStatus.GENERATION_FAILED.
+            payload = _union_payloads(chunk_payloads)
+        usage = response.usage
+        return SummaryResult(
+            platform=platform,
+            group_id=group_id,
+            start_time=start_time,
+            end_time=end_time,
+            message_count=message_count,
+            summary=payload.summary,
+            topics=tuple(payload.topics),
+            key_points=tuple(payload.key_points),
+            decisions=tuple(payload.decisions),
+            action_items=tuple(
+                SummaryActionItem(
+                    description=item.description,
+                    owner=item.owner,
+                    deadline=item.deadline,
+                )
+                for item in payload.action_items
+            ),
+            open_questions=tuple(payload.open_questions),
+            provider=response.provider,
+            model=response.model,
+            finish_reason=response.finish_reason,
+            input_chars=len(rendered_chunks),
             prompt_version=SUMMARY_PROMPT_VERSION,
             prompt_tokens=None if usage is None else usage.prompt_tokens,
             completion_tokens=None if usage is None else usage.completion_tokens,
@@ -261,3 +422,90 @@ def _empty_result(
         completion_tokens=None,
         total_tokens=None,
     )
+
+
+def _split_messages(
+    messages: tuple[InternalMessage, ...],
+    chunk_messages: int,
+) -> list[tuple[InternalMessage, ...]]:
+    """Split an ordered message tuple into non-overlapping chunks.
+
+    The caller is expected to validate ``chunk_messages``; this
+    helper assumes a positive size and never returns an empty chunk.
+    """
+
+    if chunk_messages < 1:
+        raise ValueError("chunk_messages must be at least one")
+    if not messages:
+        return []
+    return [
+        messages[index : index + chunk_messages]
+        for index in range(0, len(messages), chunk_messages)
+    ]
+
+
+def _fallback_payload(
+    rendered: str,
+    *,
+    chunk_index: int,
+) -> _SummaryPayload:
+    """Build a placeholder payload for a chunk that could not be summarized.
+
+    The original ``rendered`` text is intentionally not embedded into
+    the placeholder: the synthesis step is the next caller, and feeding
+    untrusted chat content back through the LLM is the very thing
+    ``SUMMARY_SYSTEM_PROMPT`` is designed to prevent.
+    """
+
+    del rendered  # never used; kept to make the contract obvious
+    return _SummaryPayload(
+        summary=f"第 {chunk_index} 段摘要不可用：单段渲染超出字符上限。",
+        topics=[],
+        key_points=[],
+        decisions=[],
+        action_items=[],
+        open_questions=[],
+    )
+
+
+def _union_payloads(payloads: list[_SummaryPayload]) -> _SummaryPayload:
+    """Merge several chunk summaries into a single coherent payload.
+
+    The merge is deterministic: summaries are concatenated in order,
+    while topics, key_points, decisions, and open_questions are
+    deduplicated (preserving first-seen order).  Action items are
+    deduplicated by the (description, owner, deadline) triple.
+    """
+
+    summary_sections = [payload.summary for payload in payloads if payload.summary]
+    seen_actions: set[tuple[str, str | None, str | None]] = set()
+    merged_actions: list[_ActionItemPayload] = []
+    for payload in payloads:
+        for item in payload.action_items:
+            key = (item.description, item.owner, item.deadline)
+            if key in seen_actions:
+                continue
+            seen_actions.add(key)
+            merged_actions.append(item)
+    return _SummaryPayload(
+        summary="\n".join(summary_sections),
+        topics=_dedup_strings(payload.topics for payload in payloads),
+        key_points=_dedup_strings(payload.key_points for payload in payloads),
+        decisions=_dedup_strings(payload.decisions for payload in payloads),
+        action_items=merged_actions,
+        open_questions=_dedup_strings(
+            payload.open_questions for payload in payloads
+        ),
+    )
+
+
+def _dedup_strings(sources) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for source in sources:
+        for value in source:
+            if value in seen:
+                continue
+            seen.add(value)
+            result.append(value)
+    return result
