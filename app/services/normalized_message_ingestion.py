@@ -40,12 +40,14 @@ class QQOfficialNormalizedMessageIngestionService:
                 parser_name=QQ_OFFICIAL_PARSER_NAME,
                 parser_version=QQ_OFFICIAL_PARSER_VERSION,
             )
-        except Exception as error:
-            logger.error(
-                "normalized message persistence failed raw_event_id=%s platform=%s parser_name=%s error_type=%s",
+        except Exception:
+            # The raw receipt is already persisted, so we never lose the
+            # original payload.  We still log with traceback so the
+            # underlying parser/repository failure is debuggable.
+            logger.exception(
+                "normalized message persistence failed raw_event_id=%s platform=%s parser_name=%s",
                 raw_event.id,
                 raw_event.platform,
                 QQ_OFFICIAL_PARSER_NAME,
-                type(error).__name__,
             )
             return None
