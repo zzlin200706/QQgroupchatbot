@@ -339,3 +339,62 @@ class AssistantInteractionRecord(Base):
     total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     response_message_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class InteractionOutboxRecord(Base):
+    """Durable per-interaction state machine.
+
+    A row exists for every ``QQ Official`` interaction that the
+    bot was asked to perform.  The row transitions through
+    ``pending → running → completed`` (or ``pending → running →
+    failed``) and survives process restarts, so a SIGTERM during a
+    long LLM call does not silently lose the reply.
+    """
+
+    __tablename__ = "interaction_outbox"
+    __table_args__ = (
+        UniqueConstraint(
+            "platform",
+            "group_id",
+            "trigger_message_id",
+            "interaction_name",
+            name="uq_interaction_outbox_trigger",
+        ),
+        Index(
+            "ix_interaction_outbox_status_started",
+            "status",
+            "started_at",
+        ),
+        Index(
+            "ix_interaction_outbox_raw_event_id",
+            "source_raw_event_id",
+        ),
+    )
+
+    STATUS_PENDING = "pending"
+    STATUS_RUNNING = "running"
+    STATUS_COMPLETED = "completed"
+    STATUS_FAILED = "failed"
+    _VALID_STATUSES = frozenset(
+        {STATUS_PENDING, STATUS_RUNNING, STATUS_COMPLETED, STATUS_FAILED}
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    platform: Mapped[str] = mapped_column(String(32), nullable=False)
+    group_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    trigger_message_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    interaction_name: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_raw_event_id: Mapped[int] = mapped_column(
+        ForeignKey("raw_events.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    response_message_id: Mapped[str | None] = mapped_column(
+        String(256), nullable=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)

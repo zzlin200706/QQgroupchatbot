@@ -46,6 +46,7 @@ from app.services.summary_command import SummaryCommandHandler
 from app.storage.database import Database
 from app.storage.assistant_interaction_repository import AssistantInteractionRepository
 from app.storage.command_trigger_claim_repository import CommandTriggerClaimRepository
+from app.storage.interaction_outbox_repository import InteractionOutboxRepository
 from app.storage.message_repository import MessageRepository
 from app.storage.raw_event_repository import RawEventRepository
 from app.storage.summary_repository import SummaryRepository
@@ -270,10 +271,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raw_ingestion_service=raw_ingestion_service,
             normalized_ingestion_service=normalized_ingestion_service,
             interaction_dispatcher=interaction_dispatcher,
-            max_concurrent_interactions=(
-                app_settings.llm_max_concurrent_interactions
-            ),
+            outbox_repository=InteractionOutboxRepository(database.session_factory),
         )
+        outbox_worker = None
+        if (
+            app_settings.summary_command_enabled
+            or app_settings.group_assistant_enabled
+        ):
+            from app.services.interaction_outbox_worker import (
+                InteractionOutboxWorker,
+            )
+            outbox_worker = InteractionOutboxWorker(
+                session_factory=database.session_factory,
+                outbox_repository=InteractionOutboxRepository(
+                    database.session_factory
+                ),
+                raw_event_repository=raw_repository,
+                interaction_repository=assistant_interaction_repository,
+                on_handle=interaction_dispatcher.handle,
+                max_concurrent=app_settings.llm_max_concurrent_interactions,
+                num_workers=1,
+                poll_interval_seconds=0.5,
+            )
+            await outbox_worker.start()
         if app_settings.qq_event_transport == "websocket":
             gateway_client = QQOfficialGatewayClient(
                 auth_client=auth_client,
@@ -297,6 +317,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         application.state.qq_gateway_task = gateway_task
         application.state.qq_webhook_adapter = webhook_adapter
         application.state.qq_event_processor = event_processor
+        application.state.qq_outbox_worker = outbox_worker
         application.state.qq_event_transport = app_settings.qq_event_transport
         application.state.qq_group_message_sender = group_message_sender
         application.state.llm_provider = llm_provider
@@ -327,17 +348,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await asyncio.gather(gateway_task, return_exceptions=True)
             if gateway_client is not None:
                 await gateway_client.close()
-            # Drain short, non-LLM work (e.g. ping command sends) so we
-            # do not lose the passive-reply promise for already-processed
-            # commands.  LLM-bound interactions may still be in flight;
-            # give them a bounded grace period, then cancel.
-            try:
-                await event_processor.drain(
-                    timeout=app_settings.qq_shutdown_drain_timeout_seconds,
-                )
-            except Exception:
-                logger.exception("qq official event drain failed during shutdown")
-            await event_processor.aclose()
+            # Stop the outbox worker first; this lets any in-flight
+            # handler finish (up to a bounded timeout) and any pending
+            # row stay in 'pending' / 'running' so the next start can
+            # recover it.
+            if outbox_worker is not None:
+                try:
+                    await asyncio.wait_for(
+                        outbox_worker.stop(),
+                        timeout=app_settings.qq_shutdown_drain_timeout_seconds,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "qq official outbox worker stop timed out; "
+                        "in-flight rows will be recovered on next start"
+                    )
+                except Exception:
+                    logger.exception("qq official outbox worker stop failed")
             if image_resource_resolver is not None:
                 await image_resource_resolver.aclose()
             if vision_provider is not None and vision_provider is not llm_provider:

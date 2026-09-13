@@ -16,6 +16,9 @@ APP_ID = "11111111"
 APP_SECRET = "test-app-secret"
 
 
+
+
+
 def _seed(secret: str) -> bytes:
     seed = secret.encode("utf-8")
     while len(seed) < 32:
@@ -158,7 +161,7 @@ async def test_webhook_ordinary_message_persists_raw_and_normalized_without_repl
                 timestamp="1725442341",
                 body=body,
             )
-        await app.state.qq_event_processor.drain()
+        await _wait_for_outbox(app)
         raw_events = await app.state.raw_event_repository.list_recent()
         assert len(raw_events) == 1
         normalized = await app.state.message_repository.get_by_raw_event_id(
@@ -210,7 +213,7 @@ async def test_webhook_ping_replies_without_calling_llm(
                 timestamp="1725442342",
                 body=body,
             )
-        await app.state.qq_event_processor.drain()
+        await _wait_for_outbox(app)
         raw_events = await app.state.raw_event_repository.list_recent()
         normalized = await app.state.message_repository.get_by_raw_event_id(
             raw_events[0].id,
@@ -295,7 +298,7 @@ async def test_webhook_summary_queries_current_group_only_and_replies_to_trigger
                 timestamp="1725442345",
                 body=command,
             )
-        await app.state.qq_event_processor.drain()
+        await _wait_for_outbox(app)
         history = await app.state.summary_repository.list_for_group(
             platform="qq_official",
             group_id="group-a",
@@ -320,3 +323,27 @@ async def test_webhook_summary_queries_current_group_only_and_replies_to_trigger
     assert response_b.status_code == 200
     assert response_command.status_code == 200
     assert response_command.json() == {"op": 12}
+
+async def _wait_for_outbox(app, *, timeout: float = 5.0) -> None:
+    """Wait for the outbox to drain so the test can assert deterministically.
+
+    The outbox is drained by ``app.state.qq_outbox_worker``.  When
+    no worker is configured (e.g. webhook-only tests with no LLM
+    features) the helper is a no-op.
+    """
+    import asyncio
+    import time
+    worker = getattr(app.state, "qq_outbox_worker", None)
+    if worker is None:
+        await asyncio.sleep(0.05)
+        return
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        stats = await worker._outbox_repository.stats()  # noqa: SLF001
+        if stats["pending"] == 0 and stats["running"] == 0:
+            await asyncio.sleep(0.01)
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(
+        f"outbox did not drain: {await worker._outbox_repository.stats()}"  # noqa: SLF001
+    )

@@ -30,6 +30,7 @@ from app.services.qq_official_event_processor import QQOfficialEventProcessor
 from app.services.raw_event_ingestion import QQOfficialRawEventIngestionService
 from app.storage.assistant_interaction_repository import AssistantInteractionRepository
 from app.storage.database import Database
+from app.storage.interaction_outbox_repository import InteractionOutboxRepository
 from app.storage.message_repository import MessageRepository
 from app.storage.models import AssistantTriggerClaimRecord
 from app.storage.raw_event_repository import RawEventRepository
@@ -103,6 +104,7 @@ class FakeVisionProvider:
 class Pipeline:
     database: Database
     processor: QQOfficialEventProcessor
+    worker: "InteractionOutboxWorker"
     raw_repository: RawEventRepository
     message_repository: MessageRepository
     interaction_repository: AssistantInteractionRepository
@@ -160,10 +162,27 @@ async def build_pipeline(
             command_dispatcher=commands,
             assistant_handler=assistant,
         ),
+        outbox_repository=InteractionOutboxRepository(database.session_factory),
     )
+    from app.services.interaction_outbox_worker import InteractionOutboxWorker
+    outbox_repo = InteractionOutboxRepository(database.session_factory)
+    worker = InteractionOutboxWorker(
+        session_factory=database.session_factory,
+        outbox_repository=outbox_repo,
+        raw_event_repository=raw_repository,
+        interaction_repository=interaction_repository,
+        on_handle=lambda message: QQOfficialInteractionDispatcher(
+            command_dispatcher=commands, assistant_handler=assistant,
+        ).handle(message),
+        max_concurrent=4,
+        num_workers=1,
+        poll_interval_seconds=0.05,
+    )
+    await worker.start()
     return Pipeline(
         database=database,
         processor=processor,
+        worker=worker,
         raw_repository=raw_repository,
         message_repository=message_repository,
         interaction_repository=interaction_repository,
@@ -251,7 +270,32 @@ def reply_dispatch(
 
 async def process(pipeline: Pipeline, event: QQGatewayDispatch) -> None:
     await pipeline.processor.process(inbound_event_from_gateway_dispatch(event))
-    await pipeline.processor.drain()
+    # Wait for the outbox to drain so the test can deterministically
+    # assert on the provider / sender / interaction_repository.
+    await _wait_for_outbox_idle(pipeline)
+
+
+async def _wait_for_outbox_idle(pipeline: Pipeline, *, timeout: float = 5.0) -> None:
+    """Spin until the outbox reports no in-flight or pending rows.
+
+    The worker is the only writer to the outbox.  A small busy-wait
+    is the simplest test-side primitive; the real production path
+    uses asyncio.Event coordination.
+    """
+
+    import asyncio
+    import time
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        stats = await pipeline.worker._outbox_repository.stats()  # noqa: SLF001
+        if stats["pending"] == 0 and stats["running"] == 0:
+            # Give a moment for the post-completion writes to settle.
+            await asyncio.sleep(0.01)
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(
+        f"outbox did not drain: {await pipeline.worker._outbox_repository.stats()}"  # noqa: SLF001
+    )
 
 
 @pytest.mark.asyncio
@@ -312,7 +356,7 @@ async def test_grounded_qa_is_raw_first_group_scoped_and_persisted_after_send(
         assert history[0].interaction.requester.user_id == "user-a"
         assert history[0].interaction.group_id == "group-a"
     finally:
-        await pipeline.processor.aclose()
+        await pipeline.worker.stop()
         await pipeline.database.dispose()
 
 
@@ -385,7 +429,7 @@ async def test_group_at_chat_uses_general_context_and_successful_assistant_histo
             "chat-2",
         ]
     finally:
-        await pipeline.processor.aclose()
+        await pipeline.worker.stop()
         await pipeline.database.dispose()
 
 
@@ -414,7 +458,7 @@ async def test_ordinary_messages_persist_without_assistant_or_llm(tmp_path: Path
         assert pipeline.provider.requests == []
         assert pipeline.sender.calls == []
     finally:
-        await pipeline.processor.aclose()
+        await pipeline.worker.stop()
         await pipeline.database.dispose()
 
 
@@ -482,7 +526,7 @@ async def test_replies_without_explicit_trigger_are_stored_without_claim_or_llm(
             )
         assert claims == []
     finally:
-        await pipeline.processor.aclose()
+        await pipeline.worker.stop()
         await pipeline.database.dispose()
 
 
@@ -520,7 +564,7 @@ async def test_grounded_qa_reply_excludes_current_quoted_content_from_evidence(
         assert "<quoted_platform_content" not in prompt
         assert pipeline.sender.calls == [("group-a", "下午两点。", "qa-reply")]
     finally:
-        await pipeline.processor.aclose()
+        await pipeline.worker.stop()
         await pipeline.database.dispose()
 
 
@@ -563,7 +607,7 @@ async def test_explicit_group_at_reply_uses_unverified_platform_quote_once(
             "mention_chat"
         ]
     finally:
-        await pipeline.processor.aclose()
+        await pipeline.worker.stop()
         await pipeline.database.dispose()
 
 
@@ -632,7 +676,7 @@ async def test_image_group_at_is_enriched_for_chat_but_source_metadata_stays_sto
         assert image_segment.height == 600
         assert image_segment.description is None
     finally:
-        await pipeline.processor.aclose()
+        await pipeline.worker.stop()
         await pipeline.database.dispose()
 
 
@@ -676,5 +720,5 @@ async def test_ordinary_image_persists_without_vision_llm_or_outbound(
         assert pipeline.provider.requests == []
         assert pipeline.sender.calls == []
     finally:
-        await pipeline.processor.aclose()
+        await pipeline.worker.stop()
         await pipeline.database.dispose()

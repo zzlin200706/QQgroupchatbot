@@ -1,32 +1,33 @@
-"""Shared QQ Official inbound event processing across transports."""
+"""Shared QQ Official inbound event processing across transports.
+
+The processor is the *producer* side of the durable outbox pipeline.
+It writes a ``pending`` row for every recognised interaction; the
+:class:`InteractionOutboxWorker` is the consumer that actually runs
+the LLM-bound work.
+"""
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from collections.abc import Coroutine
 from dataclasses import dataclass
-from typing import Any, Protocol
 
 from app.adapters.qq_official.inbound import QQOfficialInboundEvent
-from app.domain.messages import InternalMessage
 from app.services.interaction_dispatch import QQOfficialInteractionDispatcher
 from app.services.normalized_message_ingestion import (
     QQOfficialNormalizedMessageIngestionService,
 )
 from app.services.raw_event_ingestion import QQOfficialRawEventIngestionService
+from app.storage.interaction_outbox_repository import InteractionOutboxRepository
 
 
 logger = logging.getLogger(__name__)
 
 
-class _TaskFactory(Protocol):
-    def __call__(
-        self,
-        coro: Coroutine[Any, Any, object],
-        *,
-        name: str | None = None,
-    ) -> asyncio.Task[object]: ...
+# The QQ Official adapter is the only supported platform at the
+# moment (per AGENTS.md).  When a second adapter is added, the
+# platform value should be derived from the inbound event instead
+# of being a constant.
+QQ_OFFICIAL_PLATFORM = "qq_official"
 
 
 @dataclass(frozen=True)
@@ -37,7 +38,8 @@ class QQOfficialEventProcessResult:
     normalized_persisted: bool
     raw_event_id: int | None
     interaction_name: str | None
-    interaction_scheduled: bool
+    outbox_id: int | None = None
+    outbox_already_existed: bool = False
 
     @property
     def command_name(self) -> str | None:
@@ -45,20 +47,25 @@ class QQOfficialEventProcessResult:
 
         return self.interaction_name
 
+    @property
+    def interaction_scheduled(self) -> bool:
+        """Backward-compatible alias for historical diagnostics.
+
+        Always ``True`` for newly-created outbox rows.  Always
+        ``False`` for a row we refused to create (duplicate or
+        missing identifier).
+        """
+
+        return self.outbox_id is not None and not self.outbox_already_existed
+
 
 class QQOfficialEventProcessor:
-    """Persist raw payloads first, then normalize, then dispatch commands.
+    """Persist raw payloads first, then normalize, then enqueue work.
 
-    A bounded :class:`asyncio.Semaphore` keeps the number of in-flight
-    LLM-bound interactions (summary / chat / QA) under control so a flood
-    of group messages cannot fan out into an unbounded number of provider
-    calls.
-
-    Slot acquisition happens *synchronously* during ``process``: when the
-    process is already at the bound, ``process`` records the interaction
-    as recognised but not scheduled (``interaction_scheduled=False``).
-    This is preferable to building an unbounded queue of coroutines that
-    may be cancelled at shutdown before ever running.
+    Every recognised interaction is recorded in a durable outbox so
+    a SIGTERM or crash does not silently lose the reply: the
+    :class:`InteractionOutboxWorker` re-queues any ``pending`` or
+    stale ``running`` rows on the next start.
     """
 
     def __init__(
@@ -67,19 +74,16 @@ class QQOfficialEventProcessor:
         raw_ingestion_service: QQOfficialRawEventIngestionService,
         normalized_ingestion_service: QQOfficialNormalizedMessageIngestionService,
         interaction_dispatcher: QQOfficialInteractionDispatcher,
-        task_factory: _TaskFactory = asyncio.create_task,
-        max_concurrent_interactions: int = 4,
+        outbox_repository: InteractionOutboxRepository,
+        max_attempts: int = 3,
     ) -> None:
-        if max_concurrent_interactions < 1:
-            raise ValueError("max_concurrent_interactions must be at least one")
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least one")
         self._raw_ingestion_service = raw_ingestion_service
         self._normalized_ingestion_service = normalized_ingestion_service
         self._interaction_dispatcher = interaction_dispatcher
-        self._task_factory = task_factory
-        self._max_concurrent_interactions = max_concurrent_interactions
-        self._interaction_tasks: set[asyncio.Task[object]] = set()
-        self._semaphore = asyncio.BoundedSemaphore(max_concurrent_interactions)
-        self._closed = False
+        self._outbox_repository = outbox_repository
+        self._max_attempts = max_attempts
 
     async def process(
         self,
@@ -94,7 +98,6 @@ class QQOfficialEventProcessor:
                 normalized_persisted=False,
                 raw_event_id=None,
                 interaction_name=None,
-                interaction_scheduled=False,
             )
 
         normalized = await self._normalized_ingestion_service.ingest(raw_event)
@@ -106,15 +109,55 @@ class QQOfficialEventProcessor:
                 normalized_persisted=False,
                 raw_event_id=raw_event.id,
                 interaction_name=None,
-                interaction_scheduled=False,
             )
 
         interaction_name = self._interaction_dispatcher.interaction_name(normalized)
-        scheduled = False
-        if interaction_name is not None:
-            scheduled = await self._try_schedule_interaction(
+        if interaction_name is None:
+            return QQOfficialEventProcessResult(
+                transport=event.transport,
+                event_type=event.event_type,
+                raw_persisted=True,
+                normalized_persisted=True,
+                raw_event_id=raw_event.id,
+                interaction_name=None,
+            )
+
+        group_id = normalized.context.group_id or ""
+        trigger_message_id = normalized.platform_message_id or ""
+        if not group_id or not trigger_message_id:
+            logger.warning(
+                "qq official interaction not enqueued: missing group_id or message_id raw_event_id=%s",
+                raw_event.id,
+            )
+            return QQOfficialEventProcessResult(
+                transport=event.transport,
+                event_type=event.event_type,
+                raw_persisted=True,
+                normalized_persisted=True,
+                raw_event_id=raw_event.id,
                 interaction_name=interaction_name,
-                message=normalized,
+            )
+
+        outbox_row, created = await self._outbox_repository.create_pending(
+            platform=QQ_OFFICIAL_PLATFORM,
+            group_id=group_id,
+            trigger_message_id=trigger_message_id,
+            interaction_name=interaction_name,
+            source_raw_event_id=raw_event.id,
+            max_attempts=self._max_attempts,
+        )
+        if not created:
+            # Duplicate trigger: the work is already enqueued or
+            # completed.  We do not schedule a second in-process task.
+            return QQOfficialEventProcessResult(
+                transport=event.transport,
+                event_type=event.event_type,
+                raw_persisted=True,
+                normalized_persisted=True,
+                raw_event_id=raw_event.id,
+                interaction_name=interaction_name,
+                outbox_id=outbox_row.id,
+                outbox_already_existed=True,
             )
 
         return QQOfficialEventProcessResult(
@@ -124,115 +167,8 @@ class QQOfficialEventProcessor:
             normalized_persisted=True,
             raw_event_id=raw_event.id,
             interaction_name=interaction_name,
-            interaction_scheduled=scheduled,
+            outbox_id=outbox_row.id,
         )
 
-    async def drain(self, *, timeout: float | None = None) -> None:
-        """Wait until all currently-scheduled interaction tasks settle."""
 
-        tasks = tuple(self._interaction_tasks)
-        if not tasks:
-            return
-        if timeout is None:
-            await asyncio.gather(*tasks, return_exceptions=True)
-            return
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True),
-                timeout=timeout,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                "qq official event drain timed out pending_tasks=%s",
-                len(tasks),
-            )
-
-    async def aclose(self) -> None:
-        """Cancel in-flight interaction tasks and stop accepting new work."""
-
-        if self._closed:
-            return
-        self._closed = True
-        tasks = tuple(self._interaction_tasks)
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-    async def _try_schedule_interaction(
-        self,
-        *,
-        interaction_name: str,
-        message: InternalMessage,
-    ) -> bool:
-        """Reserve a slot and create a background task; return False when saturated."""
-
-        if self._closed:
-            return False
-        # BoundedSemaphore raises ValueError on release mismatch but
-        # `acquire()` itself only returns False when no slot is free.
-        acquired = self._semaphore.locked() is False and self._semaphore._value > 0  # type: ignore[attr-defined]
-        if not acquired:
-            logger.warning(
-                "qq official interaction dropped due to saturation interaction_name=%s max=%s",
-                interaction_name,
-                self._max_concurrent_interactions,
-            )
-            return False
-        try:
-            task = self._task_factory(
-                self._run_interaction(interaction_name, message),
-                name=f"qq-official-{interaction_name}-interaction",
-            )
-        except RuntimeError:
-            logger.warning(
-                "qq official interaction scheduling refused interaction_name=%s",
-                interaction_name,
-            )
-            return False
-        self._interaction_tasks.add(task)
-        task.add_done_callback(self._command_task_finished)
-        return True
-
-    async def _run_interaction(
-        self,
-        interaction_name: str,
-        message: InternalMessage,
-    ) -> object | None:
-        """Hold one slot while dispatching, release on completion or cancel."""
-
-        try:
-            await self._semaphore.acquire()
-        except asyncio.CancelledError:
-            raise
-        try:
-            return await self._interaction_dispatcher.handle(message)
-        finally:
-            try:
-                self._semaphore.release()
-            except ValueError:
-                # BoundedSemaphore.release raises when called more times
-                # than acquired; this would indicate a logic bug, but
-                # we must not raise from the finally block.
-                logger.exception(
-                    "qq official semaphore over-release interaction_name=%s",
-                    interaction_name,
-                )
-
-    def _command_task_finished(self, task: asyncio.Task[object]) -> None:
-        self._interaction_tasks.discard(task)
-        if task.cancelled():
-            return
-        error = task.exception()
-        if error is None:
-            return
-        # `task.exception()` returns the exception object; its
-        # ``__traceback__`` is still set, so we can pass it via
-        # ``exc_info`` even though we are not inside an ``except``
-        # block here.
-        logger.error(
-            "qq official interaction task failed task_name=%s error_type=%s",
-            task.get_name(),
-            type(error).__name__,
-            exc_info=(type(error), error, error.__traceback__),
-        )
+__all__ = ["QQOfficialEventProcessor", "QQOfficialEventProcessResult"]

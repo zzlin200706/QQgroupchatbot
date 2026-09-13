@@ -1,9 +1,18 @@
+"""Tests for the producer side of the durable interaction outbox.
+
+The producer (``QQOfficialEventProcessor``) is responsible for
+parsing, persisting the raw event, normalising, and writing a
+``pending`` outbox row.  It does *not* run the LLM-bound work; that
+is the consumer's job (``InteractionOutboxWorker``).
+"""
+
 from __future__ import annotations
 
-import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import pytest
+import pytest_asyncio
 
 from app.adapters.qq_official.inbound import QQOfficialInboundEvent
 from app.domain.messages import (
@@ -17,7 +26,17 @@ from app.domain.messages import (
     TextSegment,
 )
 from app.services.qq_official_event_processor import QQOfficialEventProcessor
+from app.storage.database import Database
+from app.storage.interaction_outbox_repository import InteractionOutboxRepository
 from app.storage.models import RawEvent
+from app.storage.raw_event_repository import RawEventRepository
+
+
+@dataclass
+class _Environment:
+    database: Database
+    outbox_repo: InteractionOutboxRepository
+    raw_event_repo: RawEventRepository
 
 
 def identity() -> IdentityRef:
@@ -31,14 +50,14 @@ def identity() -> IdentityRef:
     )
 
 
-def inbound_event(text: str = "hello") -> QQOfficialInboundEvent:
+def inbound_event(text: str = "hello", *, message_id: str = "message-1") -> QQOfficialInboundEvent:
     payload = {
         "id": "event-1",
         "op": 0,
         "s": 1,
         "t": "GROUP_MESSAGE_CREATE",
         "d": {
-            "id": "message-1",
+            "id": message_id,
             "timestamp": "2026-08-11T12:00:00+08:00",
             "group_openid": "group-1",
             "message_type": 0,
@@ -57,9 +76,8 @@ def inbound_event(text: str = "hello") -> QQOfficialInboundEvent:
     )
 
 
-def raw_event() -> RawEvent:
-    return RawEvent(
-        id=1,
+async def _persist_raw(env: _Environment, payload_hash: str = "hash") -> RawEvent:
+    raw = RawEvent(
         platform="qq_official",
         received_at=datetime.now(timezone.utc),
         event_time=datetime.now(timezone.utc),
@@ -71,16 +89,17 @@ def raw_event() -> RawEvent:
         group_id="group-1",
         message_id="message-1",
         raw_payload={},
-        payload_hash="hash",
+        payload_hash=payload_hash,
     )
+    return await env.raw_event_repo.insert(raw)
 
 
-def internal_message(text: str = "hello") -> InternalMessage:
+def internal_message(text: str = "hello", *, message_id: str = "message-1") -> InternalMessage:
     actor = identity()
     return InternalMessage(
         platform="qq_official",
         source_raw_event_id=1,
-        platform_message_id="message-1",
+        platform_message_id=message_id,
         context=MessageContext(
             message_type="0",
             sub_type="GROUP_MESSAGE_CREATE",
@@ -97,18 +116,29 @@ def internal_message(text: str = "hello") -> InternalMessage:
     )
 
 
-class FakeRawIngestion:
-    def __init__(self, *, result: RawEvent | None) -> None:
-        self.result = result
+class PersistingRawIngestion:
+    """A raw ingestion service that writes to the real repo."""
+
+    def __init__(self, env: _Environment) -> None:
+        self.env = env
         self.calls: list[QQOfficialInboundEvent] = []
 
     async def ingest(self, event: QQOfficialInboundEvent) -> RawEvent | None:
         self.calls.append(event)
-        return self.result
+        return await _persist_raw(self.env)
 
 
-class FakeNormalizedIngestion:
-    def __init__(self, *, result: InternalMessage | None) -> None:
+class NoneRawIngestion:
+    def __init__(self) -> None:
+        self.calls: list[QQOfficialInboundEvent] = []
+
+    async def ingest(self, event: QQOfficialInboundEvent) -> RawEvent | None:
+        self.calls.append(event)
+        return None
+
+
+class ScriptedNormalizedIngestion:
+    def __init__(self, result: InternalMessage | None) -> None:
         self.result = result
         self.calls: list[RawEvent] = []
 
@@ -118,14 +148,8 @@ class FakeNormalizedIngestion:
 
 
 class FakeDispatcher:
-    def __init__(
-        self,
-        *,
-        interaction_name: str | None,
-        error: Exception | None = None,
-    ) -> None:
+    def __init__(self, *, interaction_name: str | None) -> None:
         self._interaction_name = interaction_name
-        self._error = error
         self.interaction_name_calls: list[InternalMessage] = []
         self.handle_calls: list[InternalMessage] = []
 
@@ -135,81 +159,110 @@ class FakeDispatcher:
 
     async def handle(self, message: InternalMessage) -> object:
         self.handle_calls.append(message)
-        if self._error is not None:
-            raise self._error
-        await asyncio.sleep(0)
         return object()
 
 
+@pytest_asyncio.fixture
+async def env(tmp_path) -> _Environment:
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'proc.db'}")
+    await db.initialize()
+    return _Environment(
+        database=db,
+        outbox_repo=InteractionOutboxRepository(db.session_factory),
+        raw_event_repo=RawEventRepository(db.session_factory),
+    )
+
+
 @pytest.mark.asyncio
-async def test_process_persists_raw_before_normalized_and_ignores_ordinary_message() -> None:
-    raw = FakeRawIngestion(result=raw_event())
-    normalized = FakeNormalizedIngestion(result=internal_message("hello"))
+async def test_process_persists_raw_and_normalized_for_ordinary_message(
+    env: _Environment,
+) -> None:
+    raw = PersistingRawIngestion(env)
+    normalized = ScriptedNormalizedIngestion(internal_message("hello"))
     dispatcher = FakeDispatcher(interaction_name=None)
     processor = QQOfficialEventProcessor(
         raw_ingestion_service=raw,
         normalized_ingestion_service=normalized,
         interaction_dispatcher=dispatcher,
+        outbox_repository=env.outbox_repo,
     )
 
     result = await processor.process(inbound_event("hello"))
 
     assert result.raw_persisted is True
     assert result.normalized_persisted is True
-    assert result.command_name is None
+    assert result.interaction_name is None
+    assert result.outbox_id is None
     assert len(raw.calls) == 1
     assert len(normalized.calls) == 1
     assert len(dispatcher.interaction_name_calls) == 1
-    assert dispatcher.handle_calls == []
 
 
 @pytest.mark.asyncio
-async def test_ping_schedules_ping_handler_only() -> None:
-    raw = FakeRawIngestion(result=raw_event())
-    normalized = FakeNormalizedIngestion(result=internal_message("#ping"))
+async def test_recognised_interaction_creates_pending_outbox_row(
+    env: _Environment,
+) -> None:
+    raw = PersistingRawIngestion(env)
+    normalized = ScriptedNormalizedIngestion(internal_message("#ping"))
     dispatcher = FakeDispatcher(interaction_name="ping")
     processor = QQOfficialEventProcessor(
         raw_ingestion_service=raw,
         normalized_ingestion_service=normalized,
         interaction_dispatcher=dispatcher,
+        outbox_repository=env.outbox_repo,
     )
 
     result = await processor.process(inbound_event("#ping"))
-    await processor.drain()
 
-    assert result.command_name == "ping"
-    assert len(dispatcher.handle_calls) == 1
-    assert dispatcher.handle_calls[0].segments[0].text == "#ping"
+    assert result.interaction_name == "ping"
+    assert result.outbox_id is not None
+    assert result.outbox_already_existed is False
+
+    row = await env.outbox_repo.get_by_id(result.outbox_id)
+    assert row is not None
+    assert row.status == "pending"
+    assert row.attempt_count == 0
+    assert row.platform == "qq_official"
+    assert row.group_id == "group-1"
+    assert row.trigger_message_id == "message-1"
+    assert row.interaction_name == "ping"
+    assert row.source_raw_event_id == result.raw_event_id
 
 
 @pytest.mark.asyncio
-async def test_summary_schedules_summary_handler_only() -> None:
-    raw = FakeRawIngestion(result=raw_event())
-    normalized = FakeNormalizedIngestion(result=internal_message("#总结"))
-    dispatcher = FakeDispatcher(interaction_name="summary")
+async def test_duplicate_trigger_returns_existing_outbox_row(
+    env: _Environment,
+) -> None:
+    raw = PersistingRawIngestion(env)
+    normalized = ScriptedNormalizedIngestion(internal_message("#ping"))
+    dispatcher = FakeDispatcher(interaction_name="ping")
     processor = QQOfficialEventProcessor(
         raw_ingestion_service=raw,
         normalized_ingestion_service=normalized,
         interaction_dispatcher=dispatcher,
+        outbox_repository=env.outbox_repo,
     )
 
-    result = await processor.process(inbound_event("#总结"))
-    await processor.drain()
+    first = await processor.process(inbound_event("#ping"))
+    second = await processor.process(inbound_event("#ping"))
 
-    assert result.command_name == "summary"
-    assert len(dispatcher.handle_calls) == 1
-    assert dispatcher.handle_calls[0].segments[0].text == "#总结"
+    assert first.outbox_id == second.outbox_id
+    assert first.outbox_already_existed is False
+    assert second.outbox_already_existed is True
 
 
 @pytest.mark.asyncio
-async def test_raw_persistence_failure_does_not_masquerade_as_success() -> None:
-    raw = FakeRawIngestion(result=None)
-    normalized = FakeNormalizedIngestion(result=internal_message("hello"))
+async def test_raw_persistence_failure_returns_failure_result(
+    env: _Environment,
+) -> None:
+    raw = NoneRawIngestion()
+    normalized = ScriptedNormalizedIngestion(internal_message("hello"))
     dispatcher = FakeDispatcher(interaction_name=None)
     processor = QQOfficialEventProcessor(
         raw_ingestion_service=raw,
         normalized_ingestion_service=normalized,
         interaction_dispatcher=dispatcher,
+        outbox_repository=env.outbox_repo,
     )
 
     result = await processor.process(inbound_event("hello"))
@@ -221,180 +274,99 @@ async def test_raw_persistence_failure_does_not_masquerade_as_success() -> None:
 
 
 @pytest.mark.asyncio
-async def test_parser_failure_keeps_raw_and_skips_command() -> None:
-    raw = FakeRawIngestion(result=raw_event())
-    normalized = FakeNormalizedIngestion(result=None)
+async def test_normalized_failure_keeps_raw_and_skips_outbox(
+    env: _Environment,
+) -> None:
+    raw = PersistingRawIngestion(env)
+    normalized = ScriptedNormalizedIngestion(None)
     dispatcher = FakeDispatcher(interaction_name="ping")
     processor = QQOfficialEventProcessor(
         raw_ingestion_service=raw,
         normalized_ingestion_service=normalized,
         interaction_dispatcher=dispatcher,
+        outbox_repository=env.outbox_repo,
     )
 
     result = await processor.process(inbound_event("hello"))
 
     assert result.raw_persisted is True
     assert result.normalized_persisted is False
+    assert result.outbox_id is None
     assert dispatcher.interaction_name_calls == []
-    assert dispatcher.handle_calls == []
 
 
 @pytest.mark.asyncio
-async def test_command_task_failure_is_logged_with_traceback(
-    caplog: pytest.LogCaptureFixture,
+async def test_missing_group_id_does_not_create_outbox_row(
+    env: _Environment,
 ) -> None:
-    raw = FakeRawIngestion(result=raw_event())
-    normalized = FakeNormalizedIngestion(result=internal_message("#ping"))
-    dispatcher = FakeDispatcher(interaction_name="ping", error=RuntimeError("boom"))
-    processor = QQOfficialEventProcessor(
-        raw_ingestion_service=raw,
-        normalized_ingestion_service=normalized,
-        interaction_dispatcher=dispatcher,
+    raw = PersistingRawIngestion(env)
+    normalized_actor = identity()
+    no_group = InternalMessage(
+        platform="qq_official",
+        source_raw_event_id=1,
+        platform_message_id="message-1",
+        context=MessageContext(message_type="0", sub_type="GROUP_MESSAGE_CREATE", group_id=None),
+        actor=normalized_actor,
+        author=normalized_actor,
+        timestamp=datetime(2026, 8, 11, 4, tzinfo=timezone.utc),
+        segments=(TextSegment(position=0, raw_data="#ping", text="#ping"),),
+        provenance=MessageProvenance(
+            source_type=ProvenanceSource.DIRECT_EVENT, raw_event_id=1
+        ),
     )
-    caplog.set_level("ERROR", logger="app.services.qq_official_event_processor")
-
-    await processor.process(inbound_event("#ping"))
-    await processor.drain()
-
-    assert "qq official interaction task failed" in caplog.text
-    # The exception is logged with logger.exception so the original
-    # "boom" RuntimeError surfaces in the traceback for debugging.
-    assert "RuntimeError: boom" in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_process_reports_interaction_scheduled_field() -> None:
-    raw = FakeRawIngestion(result=raw_event())
-    normalized = FakeNormalizedIngestion(result=internal_message("#ping"))
+    normalized = ScriptedNormalizedIngestion(no_group)
     dispatcher = FakeDispatcher(interaction_name="ping")
     processor = QQOfficialEventProcessor(
         raw_ingestion_service=raw,
         normalized_ingestion_service=normalized,
         interaction_dispatcher=dispatcher,
+        outbox_repository=env.outbox_repo,
     )
 
     result = await processor.process(inbound_event("#ping"))
-    await processor.drain()
 
-    assert result.interaction_scheduled is True
+    assert result.interaction_name == "ping"
+    assert result.outbox_id is None
+    stats = await env.outbox_repo.stats()
+    assert stats["pending"] == 0
 
 
 @pytest.mark.asyncio
-async def test_concurrent_interaction_limit_drops_excess_work() -> None:
-    """The processor must refuse to schedule more than the configured bound."""
-
-    raw = FakeRawIngestion(result=raw_event())
-    normalized = FakeNormalizedIngestion(result=internal_message("#ping"))
-
-    started = asyncio.Event()
-    release = asyncio.Event()
-    handle_started = 0
-
-    class SlowDispatcher(FakeDispatcher):
-        async def handle(self, message: InternalMessage) -> object:  # type: ignore[override]
-            nonlocal handle_started
-            handle_started += 1
-            if handle_started == 1:
-                started.set()
-                await release.wait()
-            return await super().handle(message)
-
-    dispatcher = SlowDispatcher(interaction_name="ping")
+async def test_interaction_scheduled_alias_is_true_for_new_rows(
+    env: _Environment,
+) -> None:
+    raw = PersistingRawIngestion(env)
+    normalized = ScriptedNormalizedIngestion(internal_message("#ping"))
+    dispatcher = FakeDispatcher(interaction_name="ping")
     processor = QQOfficialEventProcessor(
         raw_ingestion_service=raw,
         normalized_ingestion_service=normalized,
         interaction_dispatcher=dispatcher,
-        max_concurrent_interactions=1,
+        outbox_repository=env.outbox_repo,
     )
 
-    # First call grabs the single slot and blocks inside `handle`.
-    first = await processor.process(inbound_event("#ping"))
-    assert first.interaction_scheduled is True
-    await asyncio.wait_for(started.wait(), timeout=1.0)
+    result = await processor.process(inbound_event("#ping"))
 
-    # While the first is still in flight, additional events with the
-    # same trigger message are no-ops in the dispatcher; but if the
-    # dispatcher recognises a new interaction we should refuse to
-    # schedule it because the slot is taken.
-    extra = await processor.process(inbound_event("#ping"))
-    assert extra.interaction_scheduled is False
-
-    release.set()
-    await processor.drain()
-    await processor.aclose()
+    # The legacy 'interaction_scheduled' field is True when we created
+    # a new outbox row and False for duplicates / refusals.
+    assert result.interaction_scheduled is True
 
 
 @pytest.mark.asyncio
-async def test_aclose_refuses_new_interactions_and_cancels_running() -> None:
-    raw = FakeRawIngestion(result=raw_event())
-    normalized = FakeNormalizedIngestion(result=internal_message("#ping"))
-
-    started = asyncio.Event()
-
-    class StallingDispatcher(FakeDispatcher):
-        async def handle(self, message: InternalMessage) -> object:  # type: ignore[override]
-            started.set()
-            await asyncio.Event().wait()
-            return object()
-
-    dispatcher = StallingDispatcher(interaction_name="ping")
+async def test_interaction_scheduled_alias_is_false_for_duplicates(
+    env: _Environment,
+) -> None:
+    raw = PersistingRawIngestion(env)
+    normalized = ScriptedNormalizedIngestion(internal_message("#ping"))
+    dispatcher = FakeDispatcher(interaction_name="ping")
     processor = QQOfficialEventProcessor(
         raw_ingestion_service=raw,
         normalized_ingestion_service=normalized,
         interaction_dispatcher=dispatcher,
+        outbox_repository=env.outbox_repo,
     )
 
-    result = await processor.process(inbound_event("#ping"))
-    assert result.interaction_scheduled is True
-    await asyncio.wait_for(started.wait(), timeout=1.0)
+    await processor.process(inbound_event("#ping"))
+    second = await processor.process(inbound_event("#ping"))
 
-    await processor.aclose()
-    # After aclose, new events must be refused.
-    after_close = await processor.process(inbound_event("#ping"))
-    assert after_close.interaction_scheduled is False
-
-
-@pytest.mark.asyncio
-async def test_cancelled_interaction_releases_semaphore() -> None:
-    """Cancelling a long-running interaction must let the next one run."""
-
-    raw = FakeRawIngestion(result=raw_event())
-    normalized = FakeNormalizedIngestion(result=internal_message("#ping"))
-
-    started = asyncio.Event()
-    block = asyncio.Event()
-
-    class BlockingDispatcher(FakeDispatcher):
-        async def handle(self, message):  # type: ignore[override]
-            started.set()
-            await block.wait()
-            return object()
-
-    dispatcher = BlockingDispatcher(interaction_name="ping")
-    processor = QQOfficialEventProcessor(
-        raw_ingestion_service=raw,
-        normalized_ingestion_service=normalized,
-        interaction_dispatcher=dispatcher,
-        max_concurrent_interactions=1,
-    )
-
-    result = await processor.process(inbound_event("#ping"))
-    assert result.interaction_scheduled is True
-    await asyncio.wait_for(started.wait(), timeout=1.0)
-
-    # `aclose` cancels and gathers; afterwards a new event with a fresh
-    # dispatcher must still be schedulable.
-    await processor.aclose()
-
-    block.set()
-    # Reopen the processor (closed state must not affect a new instance).
-    processor2 = QQOfficialEventProcessor(
-        raw_ingestion_service=raw,
-        normalized_ingestion_service=normalized,
-        interaction_dispatcher=FakeDispatcher(interaction_name="ping"),
-        max_concurrent_interactions=1,
-    )
-    second = await processor2.process(inbound_event("#ping"))
-    assert second.interaction_scheduled is True
-    await processor2.drain()
-    await processor2.aclose()
+    assert second.interaction_scheduled is False
