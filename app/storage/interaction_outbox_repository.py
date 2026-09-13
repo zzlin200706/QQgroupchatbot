@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Sequence
 from datetime import datetime, timezone
@@ -29,6 +30,11 @@ class InteractionOutboxRepository:
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
+        # The claim path is single-process per AGENTS.md.  An in-process
+        # lock is enough to keep two worker tasks from claiming the
+        # same row; SQLite does not honour ``FOR UPDATE SKIP LOCKED``,
+        # so a SQL-level row lock is not available.
+        self._claim_lock = asyncio.Lock()
 
     async def create_pending(
         self,
@@ -102,30 +108,31 @@ class InteractionOutboxRepository:
     async def claim_next_pending(self) -> InteractionOutboxRecord | None:
         """Atomically claim one pending row, returning it as 'running'.
 
-        Uses a single ``UPDATE … WHERE status='pending'`` plus
-        ``RETURNING`` (SQLite ≥ 3.35 / aiosqlite) and falls back to a
-        SELECT-then-UPDATE in the same transaction when RETURNING is
-        not available.  This guarantees only one worker can ever
-        claim a given row.
+        The bot is single-process (per AGENTS.md), so a process-local
+        ``asyncio.Lock`` is enough to serialise claim attempts across
+        worker tasks.  SQLite does not honour
+        ``FOR UPDATE SKIP LOCKED`` in the way PostgreSQL does, so a
+        SQL-level row lock is not available; the in-process lock is
+        the documented contract.
         """
 
-        async with self._session_factory() as session:
-            async with session.begin():
-                row = await session.scalar(
-                    select(InteractionOutboxRecord)
-                    .where(InteractionOutboxRecord.status == InteractionOutboxRecord.STATUS_PENDING)
-                    .order_by(InteractionOutboxRecord.id.asc())
-                    .with_for_update(skip_locked=True)
-                    .limit(1)
-                )
-                if row is None:
-                    return None
-                row.status = InteractionOutboxRecord.STATUS_RUNNING
-                row.started_at = datetime.now(timezone.utc)
-                row.attempt_count = row.attempt_count + 1
-                await session.flush()
-                await session.refresh(row)
-                return row
+        async with self._claim_lock:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    row = await session.scalar(
+                        select(InteractionOutboxRecord)
+                        .where(InteractionOutboxRecord.status == InteractionOutboxRecord.STATUS_PENDING)
+                        .order_by(InteractionOutboxRecord.id.asc())
+                        .limit(1)
+                    )
+                    if row is None:
+                        return None
+                    row.status = InteractionOutboxRecord.STATUS_RUNNING
+                    row.started_at = datetime.now(timezone.utc)
+                    row.attempt_count = row.attempt_count + 1
+                    await session.flush()
+                    await session.refresh(row)
+                    return row
 
     async def mark_completed(
         self,
