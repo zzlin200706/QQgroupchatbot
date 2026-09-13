@@ -83,3 +83,28 @@ def test_phase_h_defaults_and_secret_redaction() -> None:
 def test_phase_h_numeric_settings_are_validated(override: dict[str, int]) -> None:
     with pytest.raises(ValidationError):
         Settings(_env_file=None, **override)
+
+
+def test_settings_validator_skips_credential_check_in_test_env() -> None:
+    """A test env enables features but leaves keys blank; validation passes."""
+
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        summary_command_enabled=True,
+    )
+    # The validator must not have raised and the values are kept.
+    assert settings.summary_command_enabled is True
+    assert settings.app_env == "test"
+
+
+def test_settings_validator_still_enforces_credentials_in_production() -> None:
+    """A production env with features enabled and no key must fail fast."""
+
+    with pytest.raises(ValidationError) as caught:
+        Settings(
+            _env_file=None,
+            app_env="production",
+            summary_command_enabled=True,
+        )
+    assert "DEEPSEEK_API_KEY" in str(caught.value)

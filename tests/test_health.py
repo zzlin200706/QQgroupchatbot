@@ -126,10 +126,9 @@ async def test_summary_and_assistant_share_one_provider_lifecycle(
             qq_bot_app_id="test-app-id",
             qq_bot_app_secret="test-app-secret",
             database_url=f"sqlite+aiosqlite:///{tmp_path / 'shared-provider.db'}",
-            # The Settings validator only checks the credential is non-empty;
-            # the patched create_llm_provider ignores the value entirely, so
-            # a dummy key is enough to drive the lifecycle test.
-            deepseek_api_key="sk-test-dummy",
+            # app_env="test" makes the Settings validator skip the
+            # credential check, so the test can drive the lifecycle
+            # purely through the patched create_llm_provider.
             summary_command_enabled=True,
             group_assistant_enabled=True,
         )

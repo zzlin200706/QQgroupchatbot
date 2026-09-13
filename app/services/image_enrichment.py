@@ -119,6 +119,7 @@ class ImageEnrichmentService:
                 "image resolve failed position=%s error_type=%s",
                 image.position,
                 type(error).__name__,
+                exc_info=error,
             )
             return replace(image, description=IMAGE_UNAVAILABLE_DESCRIPTION)
         try:
@@ -131,6 +132,7 @@ class ImageEnrichmentService:
                 "vision request failed position=%s error_type=%s",
                 image.position,
                 type(error).__name__,
+                exc_info=error,
             )
             return replace(image, description=IMAGE_UNAVAILABLE_DESCRIPTION)
         logger.info(

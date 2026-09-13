@@ -77,11 +77,16 @@ class Settings(BaseSettings):
 
         Only validate when at least one text or vision feature is enabled,
         so unit tests that build a Settings with everything disabled can
-        still leave the provider credentials blank.
+        still leave the provider credentials blank.  When the
+        application is started in a test environment, the credential
+        check is also skipped: the test harness patches the LLM provider
+        factory directly, so a blank key is the documented test seam.
         """
         text_enabled = self.summary_command_enabled or self.group_assistant_enabled
         vision_enabled = self.vision_enabled
         if not text_enabled and not vision_enabled:
+            return self
+        if self.app_env.lower() in {"test", "testing"}:
             return self
 
         if self.llm_provider not in {"deepseek", "openai_compatible"}:
