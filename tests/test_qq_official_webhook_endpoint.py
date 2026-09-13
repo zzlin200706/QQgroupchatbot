@@ -43,6 +43,7 @@ class FakeProcessor:
             normalized_persisted=True,
             raw_event_id=1,
             interaction_name=None,
+            interaction_scheduled=False,
         )
 
 

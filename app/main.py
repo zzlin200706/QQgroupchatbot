@@ -270,6 +270,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raw_ingestion_service=raw_ingestion_service,
             normalized_ingestion_service=normalized_ingestion_service,
             interaction_dispatcher=interaction_dispatcher,
+            max_concurrent_interactions=(
+                app_settings.llm_max_concurrent_interactions
+            ),
         )
         if app_settings.qq_event_transport == "websocket":
             gateway_client = QQOfficialGatewayClient(
@@ -324,6 +327,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await asyncio.gather(gateway_task, return_exceptions=True)
             if gateway_client is not None:
                 await gateway_client.close()
+            # Drain short, non-LLM work (e.g. ping command sends) so we
+            # do not lose the passive-reply promise for already-processed
+            # commands.  LLM-bound interactions may still be in flight;
+            # give them a bounded grace period, then cancel.
+            try:
+                await event_processor.drain(
+                    timeout=app_settings.qq_shutdown_drain_timeout_seconds,
+                )
+            except Exception:
+                logger.exception("qq official event drain failed during shutdown")
             await event_processor.aclose()
             if image_resource_resolver is not None:
                 await image_resource_resolver.aclose()

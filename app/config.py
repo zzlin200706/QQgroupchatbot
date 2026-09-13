@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     qq_api_timeout_seconds: float = Field(default=10.0, gt=0)
     qq_gateway_reconnect_initial_delay_seconds: float = Field(default=1.0, gt=0)
     qq_gateway_reconnect_max_delay_seconds: float = Field(default=30.0, gt=0)
+    qq_shutdown_drain_timeout_seconds: float = Field(default=5.0, ge=0)
 
     database_url: str = "sqlite+aiosqlite:///./data/qqgroupchatbot.db"
 
@@ -47,6 +48,10 @@ class Settings(BaseSettings):
     summary_command_enabled: bool = False
     summary_command_lookback_minutes: int = Field(default=120, ge=1)
     summary_command_cooldown_seconds: int = Field(default=60, ge=0)
+
+    # Process-wide bound on in-flight LLM-bound interactions (summary / assistant).
+    # A large group of users can otherwise fan out N concurrent LLM calls.
+    llm_max_concurrent_interactions: int = Field(default=4, ge=1)
 
     group_assistant_enabled: bool = False
     qa_lookback_minutes: int = Field(default=120, ge=1)
