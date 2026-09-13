@@ -135,13 +135,17 @@ async def test_ping_command_routes_group_transport_without_mutating_author(
             )
         )
         assert duplicate_raw is not None
+        # The dedupe key is (platform, payload_hash) so an identical
+        # dispatch collapses to the original raw row instead of producing
+        # a second one.
+        assert duplicate_raw.id == raw.id
         duplicate = await normalized_ingestion.ingest(duplicate_raw)
         assert duplicate is not None
         duplicate_status = await dispatcher.handle(duplicate)
 
         assert status is CommandStatus.SUCCEEDED
         assert duplicate_status is CommandStatus.DUPLICATE
-        assert len(await raw_repository.list_recent()) == 2
+        assert len(await raw_repository.list_recent()) == 1
         assert normalized.context.group_id == "test-group"
         assert normalized.author.user_id == "test-user"
         assert normalized.actor.user_id == "test-user"

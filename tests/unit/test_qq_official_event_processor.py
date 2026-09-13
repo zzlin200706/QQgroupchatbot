@@ -240,7 +240,7 @@ async def test_parser_failure_keeps_raw_and_skips_command() -> None:
 
 
 @pytest.mark.asyncio
-async def test_command_task_failure_is_logged_without_raising(
+async def test_command_task_failure_is_logged_with_traceback(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     raw = FakeRawIngestion(result=raw_event())
@@ -257,4 +257,98 @@ async def test_command_task_failure_is_logged_without_raising(
     await processor.drain()
 
     assert "qq official interaction task failed" in caplog.text
-    assert "boom" not in caplog.text
+    # The exception is logged with logger.exception so the original
+    # "boom" RuntimeError surfaces in the traceback for debugging.
+    assert "RuntimeError: boom" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_process_reports_interaction_scheduled_field() -> None:
+    raw = FakeRawIngestion(result=raw_event())
+    normalized = FakeNormalizedIngestion(result=internal_message("#ping"))
+    dispatcher = FakeDispatcher(interaction_name="ping")
+    processor = QQOfficialEventProcessor(
+        raw_ingestion_service=raw,
+        normalized_ingestion_service=normalized,
+        interaction_dispatcher=dispatcher,
+    )
+
+    result = await processor.process(inbound_event("#ping"))
+    await processor.drain()
+
+    assert result.interaction_scheduled is True
+
+
+@pytest.mark.asyncio
+async def test_concurrent_interaction_limit_drops_excess_work() -> None:
+    """The processor must refuse to schedule more than the configured bound."""
+
+    raw = FakeRawIngestion(result=raw_event())
+    normalized = FakeNormalizedIngestion(result=internal_message("#ping"))
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    handle_started = 0
+
+    class SlowDispatcher(FakeDispatcher):
+        async def handle(self, message: InternalMessage) -> object:  # type: ignore[override]
+            nonlocal handle_started
+            handle_started += 1
+            if handle_started == 1:
+                started.set()
+                await release.wait()
+            return await super().handle(message)
+
+    dispatcher = SlowDispatcher(interaction_name="ping")
+    processor = QQOfficialEventProcessor(
+        raw_ingestion_service=raw,
+        normalized_ingestion_service=normalized,
+        interaction_dispatcher=dispatcher,
+        max_concurrent_interactions=1,
+    )
+
+    # First call grabs the single slot and blocks inside `handle`.
+    first = await processor.process(inbound_event("#ping"))
+    assert first.interaction_scheduled is True
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    # While the first is still in flight, additional events with the
+    # same trigger message are no-ops in the dispatcher; but if the
+    # dispatcher recognises a new interaction we should refuse to
+    # schedule it because the slot is taken.
+    extra = await processor.process(inbound_event("#ping"))
+    assert extra.interaction_scheduled is False
+
+    release.set()
+    await processor.drain()
+    await processor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_aclose_refuses_new_interactions_and_cancels_running() -> None:
+    raw = FakeRawIngestion(result=raw_event())
+    normalized = FakeNormalizedIngestion(result=internal_message("#ping"))
+
+    started = asyncio.Event()
+
+    class StallingDispatcher(FakeDispatcher):
+        async def handle(self, message: InternalMessage) -> object:  # type: ignore[override]
+            started.set()
+            await asyncio.Event().wait()
+            return object()
+
+    dispatcher = StallingDispatcher(interaction_name="ping")
+    processor = QQOfficialEventProcessor(
+        raw_ingestion_service=raw,
+        normalized_ingestion_service=normalized,
+        interaction_dispatcher=dispatcher,
+    )
+
+    result = await processor.process(inbound_event("#ping"))
+    assert result.interaction_scheduled is True
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    await processor.aclose()
+    # After aclose, new events must be refused.
+    after_close = await processor.process(inbound_event("#ping"))
+    assert after_close.interaction_scheduled is False

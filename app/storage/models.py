@@ -38,13 +38,21 @@ class RawEvent(Base):
 
     The extracted columns are optional indexes only. `raw_payload` remains the
     authoritative, lossless input for later normalization and parsing.
+
+    ``(platform, payload_hash)`` is UNIQUE so a duplicate Gateway dispatch
+    or webhook retry can be detected at the storage layer and the
+    existing row returned instead of raising.
     """
 
     __tablename__ = "raw_events"
     __table_args__ = (
         Index("ix_raw_events_received_at", "received_at"),
         Index("ix_raw_events_group_id_received_at", "group_id", "received_at"),
-        Index("ix_raw_events_payload_hash", "payload_hash"),
+        UniqueConstraint(
+            "platform",
+            "payload_hash",
+            name="uq_raw_events_platform_payload_hash",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

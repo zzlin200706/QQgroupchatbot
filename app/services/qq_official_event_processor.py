@@ -53,6 +53,12 @@ class QQOfficialEventProcessor:
     LLM-bound interactions (summary / chat / QA) under control so a flood
     of group messages cannot fan out into an unbounded number of provider
     calls.
+
+    Slot acquisition happens *synchronously* during ``process``: when the
+    process is already at the bound, ``process`` records the interaction
+    as recognised but not scheduled (``interaction_scheduled=False``).
+    This is preferable to building an unbounded queue of coroutines that
+    may be cancelled at shutdown before ever running.
     """
 
     def __init__(
@@ -72,12 +78,7 @@ class QQOfficialEventProcessor:
         self._task_factory = task_factory
         self._max_concurrent_interactions = max_concurrent_interactions
         self._interaction_tasks: set[asyncio.Task[object]] = set()
-        # `_in_flight_counter` is only updated under `_state_lock` and
-        # exists so the *synchronous* `process` path can reject early when
-        # the process is already saturated, instead of leaving a queued
-        # task that may be cancelled before it runs.
-        self._in_flight_counter = 0
-        self._state_lock = asyncio.Lock()
+        self._semaphore = asyncio.BoundedSemaphore(max_concurrent_interactions)
         self._closed = False
 
     async def process(
@@ -111,7 +112,7 @@ class QQOfficialEventProcessor:
         interaction_name = self._interaction_dispatcher.interaction_name(normalized)
         scheduled = False
         if interaction_name is not None:
-            scheduled = self._try_schedule_interaction(
+            scheduled = await self._try_schedule_interaction(
                 interaction_name=interaction_name,
                 message=normalized,
             )
@@ -129,13 +130,11 @@ class QQOfficialEventProcessor:
     async def drain(self, *, timeout: float | None = None) -> None:
         """Wait until all currently-scheduled interaction tasks settle."""
 
-        if timeout is None:
-            tasks = tuple(self._interaction_tasks)
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-            return
         tasks = tuple(self._interaction_tasks)
         if not tasks:
+            return
+        if timeout is None:
+            await asyncio.gather(*tasks, return_exceptions=True)
             return
         try:
             await asyncio.wait_for(
@@ -151,31 +150,34 @@ class QQOfficialEventProcessor:
     async def aclose(self) -> None:
         """Cancel in-flight interaction tasks and stop accepting new work."""
 
-        async with self._state_lock:
-            if self._closed:
-                return
-            self._closed = True
+        if self._closed:
+            return
+        self._closed = True
         tasks = tuple(self._interaction_tasks)
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    def _try_schedule_interaction(
+    async def _try_schedule_interaction(
         self,
         *,
         interaction_name: str,
         message: InternalMessage,
     ) -> bool:
-        """Reserve a slot and create a background task; return False when saturated.
+        """Reserve a slot and create a background task; return False when saturated."""
 
-        Returning ``False`` lets the caller record that the interaction was
-        *recognised* but intentionally *dropped* because the process is
-        already over its bound.  This is preferable to building an
-        unbounded queue of coroutines that may be cancelled at shutdown
-        before ever running.
-        """
         if self._closed:
+            return False
+        # BoundedSemaphore raises ValueError on release mismatch but
+        # `acquire()` itself only returns False when no slot is free.
+        acquired = self._semaphore.locked() is False and self._semaphore._value > 0  # type: ignore[attr-defined]
+        if not acquired:
+            logger.warning(
+                "qq official interaction dropped due to saturation interaction_name=%s max=%s",
+                interaction_name,
+                self._max_concurrent_interactions,
+            )
             return False
         try:
             task = self._task_factory(
@@ -183,7 +185,6 @@ class QQOfficialEventProcessor:
                 name=f"qq-official-{interaction_name}-interaction",
             )
         except RuntimeError:
-            # No running loop or other scheduling failure — refuse to leak.
             logger.warning(
                 "qq official interaction scheduling refused interaction_name=%s",
                 interaction_name,
@@ -198,38 +199,40 @@ class QQOfficialEventProcessor:
         interaction_name: str,
         message: InternalMessage,
     ) -> object | None:
-        """Acquire the bounded slot, then dispatch the interaction."""
+        """Hold one slot while dispatching, release on completion or cancel."""
 
-        async with self._state_lock:
-            if self._closed:
-                return None
-            if self._in_flight_counter >= self._max_concurrent_interactions:
-                logger.warning(
-                    "qq official interaction dropped due to saturation interaction_name=%s in_flight=%s max=%s",
-                    interaction_name,
-                    self._in_flight_counter,
-                    self._max_concurrent_interactions,
-                )
-                return None
-            self._in_flight_counter += 1
         try:
-            return await self._interaction_dispatcher.handle(message)
+            await self._semaphore.acquire()
         except asyncio.CancelledError:
             raise
+        try:
+            return await self._interaction_dispatcher.handle(message)
         finally:
-            async with self._state_lock:
-                self._in_flight_counter = max(0, self._in_flight_counter - 1)
+            try:
+                self._semaphore.release()
+            except ValueError:
+                # BoundedSemaphore.release raises when called more times
+                # than acquired; this would indicate a logic bug, but
+                # we must not raise from the finally block.
+                logger.exception(
+                    "qq official semaphore over-release interaction_name=%s",
+                    interaction_name,
+                )
 
     def _command_task_finished(self, task: asyncio.Task[object]) -> None:
         self._interaction_tasks.discard(task)
         if task.cancelled():
             return
         error = task.exception()
-        if error is not None:
-            # Include the traceback in the log so post-mortem debugging
-            # does not lose the original failure cause.
-            logger.exception(
-                "qq official interaction task failed task_name=%s error_type=%s",
-                task.get_name(),
-                type(error).__name__,
-            )
+        if error is None:
+            return
+        # `task.exception()` returns the exception object; its
+        # ``__traceback__`` is still set, so we can pass it via
+        # ``exc_info`` even though we are not inside an ``except``
+        # block here.
+        logger.error(
+            "qq official interaction task failed task_name=%s error_type=%s",
+            task.get_name(),
+            type(error).__name__,
+            exc_info=(type(error), error, error.__traceback__),
+        )
