@@ -176,17 +176,17 @@ class OpenAICompatibleProvider:
 
             if response.status_code != 200:
                 failure = _http_error(response.status_code)
-                if (
-                    response.status_code in _RETRYABLE_STATUS_CODES
-                    and await self._retry(
+                if response.status_code in _RETRYABLE_STATUS_CODES:
+                    retry_after = _parse_retry_after(response.headers.get("Retry-After"))
+                    if await self._retry(
                         failure,
                         attempt=attempt,
                         http_status=response.status_code,
                         input_char_count=input_char_count,
                         configured_model=configured_model,
-                    )
-                ):
-                    continue
+                        retry_after_seconds=retry_after,
+                    ):
+                        continue
                 raise failure
 
             try:
@@ -220,18 +220,26 @@ class OpenAICompatibleProvider:
         http_status: int | None,
         input_char_count: int,
         configured_model: str,
+        retry_after_seconds: float | None = None,
     ) -> bool:
         if attempt >= self._max_retries:
             return False
+        # Cap the back-off to avoid the bot stalling for hours if a
+        # provider sends an abusive Retry-After header.
+        if retry_after_seconds is None:
+            delay = 0.5 * (2**attempt)
+        else:
+            delay = max(0.5 * (2**attempt), min(retry_after_seconds, 60.0))
         logger.warning(
-            "llm request retry provider=openai_compatible model=%s http_status=%s attempt=%s exception_type=%s input_char_count=%s",
+            "llm request retry provider=openai_compatible model=%s http_status=%s attempt=%s exception_type=%s input_char_count=%s delay=%s",
             configured_model,
             http_status,
             attempt + 1,
             type(failure).__name__,
             input_char_count,
+            f"{delay:.2f}s",
         )
-        await self._sleep(0.5 * (2**attempt))
+        await self._sleep(delay)
         return True
 
 
@@ -333,3 +341,22 @@ def _decode_usage(value: object) -> LLMUsage | None:
 
 def _optional_int(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """Return the documented seconds value or None for invalid input."""
+
+    if value is None:
+        return None
+    candidate = value.strip()
+    if not candidate:
+        return None
+    # HTTP-date form is rare; we only honour the documented delta-seconds form.
+    try:
+        seconds = float(candidate)
+    except ValueError:
+        return None
+    if seconds < 0 or seconds > 300.0:
+        # The provider will not actually ask us to wait days; clamp.
+        return None
+    return seconds

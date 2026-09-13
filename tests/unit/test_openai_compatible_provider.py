@@ -425,3 +425,123 @@ async def test_usage_is_optional_and_unknown_usage_fields_are_not_guessed() -> N
 
 async def _no_sleep(delay: float) -> None:
     del delay
+
+
+@pytest.mark.asyncio
+async def test_retry_after_header_honoured_when_above_backoff() -> None:
+    """If a 429 includes Retry-After: 5, the next delay is >= 5s."""
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    attempt = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempt
+        attempt += 1
+        if attempt == 1:
+            return httpx.Response(
+                429,
+                json={"error": {"message": "rate limit"}},
+                headers={"Retry-After": "5"},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "id": "ok",
+                "model": "gpt-x",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "done"},
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAICompatibleProvider(
+            api_key="k",
+            base_url="https://example.invalid",
+            model="gpt-x",
+            max_retries=2,
+            client=client,
+            sleep=fake_sleep,
+        )
+        response = await provider.complete(
+            LLMRequest(
+                system_prompt="s",
+                user_prompt="u",
+                max_output_tokens=64,
+                json_output=False,
+            )
+        )
+
+    assert response.content == "done"
+    assert sleeps, "expected at least one back-off sleep"
+    assert sleeps[0] >= 5.0
+    assert sleeps[0] <= 60.0
+    await provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_retry_after_header_rejected_when_too_large() -> None:
+    """A Retry-After larger than 300s is ignored to avoid hour-long stalls."""
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    attempt = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempt
+        attempt += 1
+        if attempt == 1:
+            return httpx.Response(
+                429,
+                json={"error": {"message": "rate limit"}},
+                headers={"Retry-After": "3600"},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "id": "ok",
+                "model": "gpt-x",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "done"},
+                    }
+                ],
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAICompatibleProvider(
+            api_key="k",
+            base_url="https://example.invalid",
+            model="gpt-x",
+            max_retries=2,
+            client=client,
+            sleep=fake_sleep,
+        )
+        await provider.complete(
+            LLMRequest(
+                system_prompt="s",
+                user_prompt="u",
+                max_output_tokens=64,
+                json_output=False,
+            )
+        )
+
+    # Falls back to exponential back-off instead of waiting an hour.
+    assert all(delay <= 60.0 for delay in sleeps)
+    assert sleeps[0] == 0.5
+    await provider.aclose()

@@ -16,7 +16,7 @@ from app.domain.messages import ImageSegment
 
 
 _SUPPORTED_CONTENT_TYPES = frozenset(
-    {"image/gif", "image/jpeg", "image/png"}
+    {"image/gif", "image/jpeg", "image/png", "image/webp"}
 )
 _REDIRECT_STATUS_CODES = frozenset({301, 302, 303, 307, 308})
 
