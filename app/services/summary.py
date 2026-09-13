@@ -132,6 +132,32 @@ class SummaryService:
         self._max_output_tokens = max_output_tokens
         self._chunk_messages = chunk_messages
 
+    def with_overrides(
+        self,
+        *,
+        max_input_chars: int | None = None,
+    ) -> "SummaryService":
+        """Return a copy of this service with selected fields overridden.
+
+        All other fields (provider, renderer, query service, image
+        enrichment, etc.) are shared by reference because they are
+        stateless.  ``max_input_chars=None`` is treated as "no
+        override" and the existing service is returned unchanged.
+        """
+
+        if max_input_chars is None or max_input_chars == self._max_input_chars:
+            return self
+        return SummaryService(
+            query_service=self._query_service,
+            renderer=self._renderer,
+            provider=self._provider,
+            image_enrichment_service=self._image_enrichment_service,
+            max_messages=self._max_messages,
+            max_input_chars=max_input_chars,
+            max_output_tokens=self._max_output_tokens,
+            chunk_messages=self._chunk_messages,
+        )
+
     async def summarize(
         self,
         *,

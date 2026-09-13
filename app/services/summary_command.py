@@ -13,6 +13,7 @@ from app.services.command_status import CommandStatus, is_valid_command_context
 from app.domain.messages import InternalMessage, ProvenanceSource, TextSegment
 from app.domain.summaries import StoredSummary, SummaryResult
 from app.rendering import SummaryMessageFormatter
+from app.services.group_ai_config_resolver import GroupAIConfigResolver
 from app.services.summary import SummaryService
 from app.storage.summary_repository import SummaryRepository
 
@@ -22,6 +23,10 @@ logger = logging.getLogger(__name__)
 
 class _SummaryGenerator(Protocol):
     async def summarize(self, **kwargs: object) -> SummaryResult: ...
+
+    def with_overrides(
+        self, *, max_input_chars: int | None = None
+    ) -> "_SummaryGenerator": ...
 
 
 class _SummaryStore(Protocol):
@@ -69,11 +74,20 @@ class SummaryCommandHandler:
         cooldown_seconds: int = 60,
         clock: Callable[[], float] = time.monotonic,
         claim_repository: _CommandClaimStore | None = None,
+        group_config_resolver: GroupAIConfigResolver | None = None,
+        default_summary_max_input_chars: int | None = None,
     ) -> None:
         if lookback_minutes < 1:
             raise ValueError("lookback_minutes must be at least one")
         if cooldown_seconds < 0:
             raise ValueError("cooldown_seconds must not be negative")
+        if (
+            default_summary_max_input_chars is not None
+            and default_summary_max_input_chars < 1
+        ):
+            raise ValueError(
+                "default_summary_max_input_chars must be a positive integer or null"
+            )
         self._summary_service = summary_service
         self._summary_repository = summary_repository
         self._formatter = formatter
@@ -83,6 +97,10 @@ class SummaryCommandHandler:
         self._cooldown_seconds = cooldown_seconds
         self._clock = clock
         self._claim_repository = claim_repository
+        self._group_config_resolver = group_config_resolver
+        self._default_summary_max_input_chars = (
+            default_summary_max_input_chars
+        )
         self._active_groups: set[tuple[str, str]] = set()
         self._last_started: dict[tuple[str, str], float] = {}
 
@@ -104,6 +122,20 @@ class SummaryCommandHandler:
         assert group_id is not None
         assert timestamp is not None
         assert message.platform_message_id is not None
+        if self._group_config_resolver is not None:
+            snapshot = await self._group_config_resolver.resolve(
+                platform=message.platform, group_id=group_id
+            )
+            if not GroupAIConfigResolver.effective_enabled(
+                snapshot, global_enabled=True
+            ):
+                logger.info(
+                    "summary command skipped: disabled by group config group_id=%s",
+                    group_id,
+                )
+                return CommandStatus.DISABLED
+        else:
+            snapshot = None
         if self._claim_repository is not None:
             try:
                 claimed = await self._claim_repository.claim(
@@ -134,10 +166,23 @@ class SummaryCommandHandler:
         self._active_groups.add(key)
         self._last_started[key] = now
 
+        summary_service = self._summary_service
+        if (
+            snapshot is not None
+            and snapshot.summary_max_input_chars is not None
+        ):
+            summary_service = self._summary_service.with_overrides(
+                max_input_chars=snapshot.summary_max_input_chars
+            )
+        elif self._default_summary_max_input_chars is not None:
+            summary_service = self._summary_service.with_overrides(
+                max_input_chars=self._default_summary_max_input_chars
+            )
+
         logger.info("summary command detected")
         try:
             try:
-                result = await self._summary_service.summarize(
+                result = await summary_service.summarize(
                     platform=message.platform,
                     group_id=group_id,
                     start_time=timestamp

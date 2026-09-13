@@ -108,6 +108,8 @@ class FakeSummaryService:
     def __init__(self, *, error: Exception | None = None) -> None:
         self.error = error
         self.calls: list[dict[str, object]] = []
+        self.overrides: list[int | None] = []
+        self.max_input_chars = 120_000
 
     async def summarize(self, **kwargs: object) -> SummaryResult:
         self.calls.append(kwargs)
@@ -120,6 +122,18 @@ class FakeSummaryService:
             start_time=kwargs["start_time"],  # type: ignore[arg-type]
             end_time=kwargs["end_time"],  # type: ignore[arg-type]
         )
+
+    def with_overrides(
+        self, *, max_input_chars: int | None = None
+    ) -> "FakeSummaryService":
+        self.overrides.append(max_input_chars)
+        clone = FakeSummaryService(error=self.error)
+        clone.max_input_chars = (
+            self.max_input_chars if max_input_chars is None else max_input_chars
+        )
+        clone.calls = self.calls
+        clone.overrides = self.overrides
+        return clone
 
 
 class BlockingSummaryService(FakeSummaryService):
@@ -491,3 +505,118 @@ async def test_send_failure_keeps_persisted_summary_and_does_not_regenerate() ->
     assert len(service.calls) == 1
     assert len(repository.results) == 1
     assert len(sender.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Group AI config (per-group override) integration
+# ---------------------------------------------------------------------------
+
+
+class FakeGroupConfigResolver:
+    def __init__(
+        self,
+        *,
+        enabled: bool | None = None,
+        summary_max_input_chars: int | None = None,
+    ) -> None:
+        self.enabled = enabled
+        self.summary_max_input_chars = summary_max_input_chars
+        self.calls: list[tuple[str, str]] = []
+
+    async def resolve(self, *, platform: str, group_id: str):
+        from app.services.group_ai_config_resolver import GroupAIConfigSnapshot
+
+        self.calls.append((platform, group_id))
+        return GroupAIConfigSnapshot(
+            enabled=self.enabled,
+            summary_max_input_chars=self.summary_max_input_chars,
+        )
+
+
+def _handler_with_resolver(
+    *,
+    resolver: FakeGroupConfigResolver | None,
+    default_max_input_chars: int | None = None,
+    service: FakeSummaryService | None = None,
+) -> tuple[SummaryCommandHandler, FakeSummaryService]:
+    service = service or FakeSummaryService()
+    repository = FakeSummaryRepository()
+    sender = FakeSender()
+    command_handler = SummaryCommandHandler(
+        summary_service=service,
+        summary_repository=repository,
+        formatter=SummaryMessageFormatter(),
+        sender=sender,
+        enabled=True,
+        lookback_minutes=120,
+        cooldown_seconds=0,
+        claim_repository=None,
+        group_config_resolver=resolver,  # type: ignore[arg-type]
+        default_summary_max_input_chars=default_max_input_chars,
+    )
+    return command_handler, service
+
+
+@pytest.mark.asyncio
+async def test_group_disabled_by_config_returns_disabled_status() -> None:
+    resolver = FakeGroupConfigResolver(enabled=False)
+    command_handler, service = _handler_with_resolver(resolver=resolver)
+
+    status = await command_handler.handle(message())
+
+    assert status is CommandStatus.DISABLED
+    assert service.calls == []
+    assert resolver.calls == [("qq_official", "synthetic-group")]
+
+
+@pytest.mark.asyncio
+async def test_group_max_input_chars_override_is_applied_to_service() -> None:
+    resolver = FakeGroupConfigResolver(summary_max_input_chars=20_000)
+    command_handler, service = _handler_with_resolver(resolver=resolver)
+
+    status = await command_handler.handle(message())
+
+    assert status is CommandStatus.SUCCEEDED
+    # The handler asked the service for an override-aware copy.
+    assert service.overrides == [20_000]
+    # And the underlying call did reach the (now override-aware) service.
+    assert len(service.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_group_without_overrides_uses_base_service() -> None:
+    resolver = FakeGroupConfigResolver(enabled=None, summary_max_input_chars=None)
+    command_handler, service = _handler_with_resolver(resolver=resolver)
+
+    status = await command_handler.handle(message())
+
+    assert status is CommandStatus.SUCCEEDED
+    # No override was applied because the snapshot was empty.
+    assert service.overrides == []
+
+
+@pytest.mark.asyncio
+async def test_default_max_input_chars_applies_when_no_resolver() -> None:
+    command_handler, service = _handler_with_resolver(
+        resolver=None, default_max_input_chars=40_000
+    )
+
+    status = await command_handler.handle(message())
+
+    assert status is CommandStatus.SUCCEEDED
+    # Even without a resolver, the configured default is applied.
+    assert service.overrides == [40_000]
+
+
+def test_handler_rejects_non_positive_default_max_input_chars() -> None:
+    with pytest.raises(ValueError, match="positive integer"):
+        SummaryCommandHandler(
+            summary_service=FakeSummaryService(),
+            summary_repository=FakeSummaryRepository(),
+            formatter=SummaryMessageFormatter(),
+            sender=FakeSender(),
+            enabled=True,
+            lookback_minutes=120,
+            cooldown_seconds=0,
+            default_summary_max_input_chars=0,
+        )

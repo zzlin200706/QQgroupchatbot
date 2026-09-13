@@ -914,3 +914,42 @@ def test_union_payloads_deduplicates_lists_and_concatenates_summary() -> None:
     assert union.key_points == ["p1", "p2", "p3"]
     assert union.decisions == ["d", "d2"]
     assert union.open_questions == ["q1", "q2"]
+
+
+# ---------------------------------------------------------------------------
+# with_overrides (per-group max_input_chars) tests
+# ---------------------------------------------------------------------------
+
+
+def test_with_overrides_returns_new_instance_with_overridden_max_input_chars() -> None:
+    service = SummaryService(
+        query_service=FakeQueryService(()),  # type: ignore[arg-type]
+        renderer=MessageRenderer(),
+        provider=FakeProvider(),
+        max_input_chars=120_000,
+    )
+    override = service.with_overrides(max_input_chars=20_000)
+    assert override is not service
+    assert override._max_input_chars == 20_000  # type: ignore[attr-defined]
+    # Other configuration is shared.
+    assert override._provider is service._provider  # type: ignore[attr-defined]
+
+
+def test_with_overrides_returns_same_instance_when_no_override() -> None:
+    service = SummaryService(
+        query_service=FakeQueryService(()),  # type: ignore[arg-type]
+        renderer=MessageRenderer(),
+        provider=FakeProvider(),
+        max_input_chars=120_000,
+    )
+    assert service.with_overrides(max_input_chars=None) is service
+
+
+def test_with_overrides_returns_same_instance_when_value_unchanged() -> None:
+    service = SummaryService(
+        query_service=FakeQueryService(()),  # type: ignore[arg-type]
+        renderer=MessageRenderer(),
+        provider=FakeProvider(),
+        max_input_chars=120_000,
+    )
+    assert service.with_overrides(max_input_chars=120_000) is service

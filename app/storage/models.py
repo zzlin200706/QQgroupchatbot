@@ -341,6 +341,41 @@ class AssistantInteractionRecord(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 
+class GroupAIConfigRecord(Base):
+    """Per-group AI configuration overrides.
+
+    The ``(platform, group_id)`` pair is unique.  Both ``enabled``
+    and ``summary_max_input_chars`` are nullable: ``NULL`` means
+    "use the global default".  A non-``NULL`` value overrides the
+    global setting for that group only.
+
+    This is intentionally minimal: the v1.1 product only needs
+    the two knobs that an operator actually has to tune per group.
+    """
+
+    __tablename__ = "group_ai_configs"
+    __table_args__ = (
+        UniqueConstraint(
+            "platform",
+            "group_id",
+            name="uq_group_ai_configs_platform_group_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    platform: Mapped[str] = mapped_column(String(32), nullable=False)
+    group_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    enabled: Mapped[bool | None] = mapped_column(nullable=True)
+    summary_max_input_chars: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
 class InteractionOutboxRecord(Base):
     """Durable per-interaction state machine.
 

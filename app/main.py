@@ -29,6 +29,7 @@ from app.parsers.qq_official_message_parser import QQOfficialMessageParser
 from app.rendering import MessageRenderer, SummaryMessageFormatter
 from app.services.command_dispatch import QQOfficialCommandDispatcher
 from app.services.conversation_query import ConversationQueryService
+from app.services.group_ai_config_resolver import GroupAIConfigResolver
 from app.services.group_assistant import GroupAssistantService
 from app.services.group_assistant_context import GroupAssistantContextBuilder
 from app.services.group_assistant_handler import GroupAssistantHandler
@@ -46,6 +47,7 @@ from app.services.summary_command import SummaryCommandHandler
 from app.storage.database import Database
 from app.storage.assistant_interaction_repository import AssistantInteractionRepository
 from app.storage.command_trigger_claim_repository import CommandTriggerClaimRepository
+from app.storage.group_ai_config_repository import GroupAIConfigRepository
 from app.storage.interaction_outbox_repository import InteractionOutboxRepository
 from app.storage.message_repository import MessageRepository
 from app.storage.raw_event_repository import RawEventRepository
@@ -119,6 +121,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         command_trigger_claim_repository = CommandTriggerClaimRepository(
             database.session_factory
+        )
+        group_ai_config_repository = GroupAIConfigRepository(
+            database.session_factory
+        )
+        group_ai_config_resolver = GroupAIConfigResolver(
+            group_ai_config_repository
         )
         auth_client = QQOfficialAuthClient(
             app_id=app_settings.qq_bot_app_id,
@@ -277,6 +285,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 lookback_minutes=app_settings.summary_command_lookback_minutes,
                 cooldown_seconds=app_settings.summary_command_cooldown_seconds,
                 claim_repository=command_trigger_claim_repository,
+                group_config_resolver=group_ai_config_resolver,
+                default_summary_max_input_chars=(
+                    app_settings.summary_max_input_chars
+                ),
             )
             command_dispatcher = QQOfficialCommandDispatcher(
                 ping_handler=ping_command_handler,
