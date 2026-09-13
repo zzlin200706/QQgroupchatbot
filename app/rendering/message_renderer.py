@@ -74,11 +74,17 @@ class MessageRenderer:
                 raise ValueError("message timestamp must be timezone-aware")
             timestamp = message.timestamp.astimezone(self._display_timezone).isoformat()
         prefix = f"[{timestamp}] {_identity_label(message.author)}: "
+        # When a single message contains multiple images we number
+        # them so the LLM can refer to "图片1" / "图片2" in its
+        # answer.  Single-image messages stay in their existing
+        # "[图片: description]" form.
+        image_index_state = _ImageIndexState()
         body = self._render_segments(
             message.segments,
             platform=message.platform,
             names=names,
             active=set(),
+            image_index_state=image_index_state,
         )
         if not body:
             body = "[空消息]"
@@ -91,13 +97,17 @@ class MessageRenderer:
         platform: str,
         names: dict[tuple[str, str], str],
         active: set[int],
+        image_index_state: "_ImageIndexState | None" = None,
     ) -> str:
+        if image_index_state is None:
+            image_index_state = _ImageIndexState()
         return "".join(
             self._render_segment(
                 segment,
                 platform=platform,
                 names=names,
                 active=active,
+                image_index_state=image_index_state,
             )
             for segment in _ordered_segments(segments)
         )
@@ -109,6 +119,7 @@ class MessageRenderer:
         platform: str,
         names: dict[tuple[str, str], str],
         active: set[int],
+        image_index_state: "_ImageIndexState",
     ) -> str:
         if isinstance(segment, TextSegment):
             return segment.text or ""
@@ -123,11 +134,14 @@ class MessageRenderer:
             )
         if isinstance(segment, ImageSegment):
             image_text = segment.description or segment.summary
-            return (
-                f"[图片: {_single_line(image_text)}]"
-                if image_text
-                else "[图片]"
-            )
+            image_index_state.total += 1
+            if image_index_state.total == 1:
+                marker = "[图片"
+            else:
+                marker = f"[图片{image_index_state.total}"
+            if image_text:
+                return f"{marker}: {_single_line(image_text)}]"
+            return f"{marker}]"
         if isinstance(segment, FileSegment):
             return (
                 f"[文件: {_single_line(segment.name)}]"
@@ -347,7 +361,23 @@ def _single_line(value: str) -> str:
     # payload such as a literal "" cannot break the rendered layout
     # or smuggle direction overrides into the prompt.
     cleaned = "".join(
-        ch if (ch == "\t" or 0x20 <= ord(ch) < 0x7F) else " "
+        ch if (ch == "\t" or 0x20 <= ord(ch) < 0x7F or ord(ch) > 0x7F) else " "
         for ch in value
     )
     return cleaned.replace("\r", " ").replace("\n", " ").replace("\t", " ")
+
+
+class _ImageIndexState:
+    """Per-message counter for image segments.
+
+    The first image is rendered as ``[图片]``; subsequent images
+    get ``[图片2]``, ``[图片3]``, ... so the LLM can refer to
+    them by index in its answer.  Single-image messages keep the
+    existing form so existing tests and prompt snapshots do not
+    need to change.
+    """
+
+    __slots__ = ("total",)
+
+    def __init__(self) -> None:
+        self.total = 0

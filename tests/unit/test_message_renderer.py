@@ -541,3 +541,117 @@ def test_single_line_strips_control_characters_except_whitespace() -> None:
     assert "\x7f" not in rendered
     # Newlines and tabs collapse to spaces (the documented contract).
     assert "alice hello world" == _single_line("alice\nhello\tworld")
+
+
+def test_multiple_images_in_one_message_are_numbered() -> None:
+    """Images 2+ get an index so the LLM can refer to them."""
+
+    from datetime import datetime, timezone
+
+    from app.domain.messages import (
+        IdentityAvailability,
+        IdentityRef,
+        IdentitySource,
+        ImageSegment,
+        InternalMessage,
+        MessageContext,
+        MessageProvenance,
+        ProvenanceSource,
+    )
+
+    actor = IdentityRef(
+        platform="qq_official",
+        user_id="u",
+        display_name="u",
+        card=None,
+        source=IdentitySource.EVENT,
+        availability=IdentityAvailability.KNOWN,
+    )
+    msg = InternalMessage(
+        platform="qq_official",
+        source_raw_event_id=1,
+        platform_message_id="m-1",
+        context=MessageContext(
+            message_type="0", sub_type="GROUP_MESSAGE_CREATE", group_id="g"
+        ),
+        actor=actor,
+        author=actor,
+        timestamp=datetime(2026, 8, 11, 4, tzinfo=timezone.utc),
+        segments=(
+            ImageSegment(
+                position=0, raw_data=None, file=None, url="u1", summary="A",
+                sub_type=None, content_type="image/jpeg", file_size=None,
+                description="A图",
+            ),
+            ImageSegment(
+                position=1, raw_data=None, file=None, url="u2", summary="B",
+                sub_type=None, content_type="image/jpeg", file_size=None,
+                description="B图",
+            ),
+            ImageSegment(
+                position=2, raw_data=None, file=None, url="u3", summary=None,
+                sub_type=None, content_type="image/jpeg", file_size=None,
+            ),
+        ),
+        provenance=MessageProvenance(
+            source_type=ProvenanceSource.DIRECT_EVENT, raw_event_id=1
+        ),
+    )
+    renderer = MessageRenderer()
+    rendered = renderer.render_message(msg)
+    assert "[图片: A图]" in rendered
+    assert "[图片2: B图]" in rendered
+    assert "[图片3]" in rendered
+
+
+def test_single_image_message_uses_unnumbered_marker() -> None:
+    """Single-image messages stay in the existing form for prompt stability."""
+
+    from datetime import datetime, timezone
+
+    from app.domain.messages import (
+        IdentityAvailability,
+        IdentityRef,
+        IdentitySource,
+        ImageSegment,
+        InternalMessage,
+        MessageContext,
+        MessageProvenance,
+        ProvenanceSource,
+    )
+
+    actor = IdentityRef(
+        platform="qq_official",
+        user_id="u",
+        display_name="u",
+        card=None,
+        source=IdentitySource.EVENT,
+        availability=IdentityAvailability.KNOWN,
+    )
+    msg = InternalMessage(
+        platform="qq_official",
+        source_raw_event_id=1,
+        platform_message_id="m-1",
+        context=MessageContext(
+            message_type="0", sub_type="GROUP_MESSAGE_CREATE", group_id="g"
+        ),
+        actor=actor,
+        author=actor,
+        timestamp=datetime(2026, 8, 11, 4, tzinfo=timezone.utc),
+        segments=(
+            ImageSegment(
+                position=0, raw_data=None, file=None, url="u", summary="x",
+                sub_type=None, content_type="image/jpeg", file_size=None,
+                description="单图",
+            ),
+        ),
+        provenance=MessageProvenance(
+            source_type=ProvenanceSource.DIRECT_EVENT, raw_event_id=1
+        ),
+    )
+    renderer = MessageRenderer()
+    rendered = renderer.render_message(msg)
+    assert "[图片: 单图]" in rendered
+    # No "图片2" or higher markers.
+    assert "图片2" not in rendered
+    assert "图片3" not in rendered
