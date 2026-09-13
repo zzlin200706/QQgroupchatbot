@@ -521,3 +521,23 @@ def test_qq_official_103_refidx_and_102_forward_are_not_reparsed() -> None:
     parsed_forward = forward.segments[0]
     assert isinstance(parsed_forward, ForwardSegment)
     assert parsed_forward.nodes == ()
+
+
+def test_single_line_keeps_tab_characters() -> None:
+    from app.rendering.message_renderer import _single_line
+
+    # Tabs are converted to spaces by the documented contract.
+    assert _single_line("a\tb") == "a b"
+
+
+def test_single_line_strips_control_characters_except_whitespace() -> None:
+    from app.rendering.message_renderer import _single_line
+
+    # NULs, BEL, DEL are replaced with spaces so they cannot break
+    # the rendered layout or smuggle direction overrides.
+    rendered = _single_line("alice\x00\x07hello\x7fworld")
+    assert "\x00" not in rendered
+    assert "\x07" not in rendered
+    assert "\x7f" not in rendered
+    # Newlines and tabs collapse to spaces (the documented contract).
+    assert "alice hello world" == _single_line("alice\nhello\tworld")

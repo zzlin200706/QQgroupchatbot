@@ -341,4 +341,13 @@ def _labeled_block(prefix: str, content: str) -> list[str]:
 
 
 def _single_line(value: str) -> str:
-    return value.replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    # Collapse the newlines that the LLM prompt or a malformed
+    # attachment might smuggle into a single segment.  Also strip
+    # ASCII control characters (0x00-0x1F except whitespace) so a
+    # payload such as a literal "" cannot break the rendered layout
+    # or smuggle direction overrides into the prompt.
+    cleaned = "".join(
+        ch if (ch == "\t" or 0x20 <= ord(ch) < 0x7F) else " "
+        for ch in value
+    )
+    return cleaned.replace("\r", " ").replace("\n", " ").replace("\t", " ")
