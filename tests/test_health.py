@@ -14,6 +14,8 @@ from app.llm import LLMRequest, LLMResponse
 
 @pytest.mark.asyncio
 async def test_health_reports_application_status() -> None:
+    # ``/health`` returns ``starting`` outside the lifespan; the
+    # database probe is skipped because no engine is wired.
     app = main_module.create_app(Settings(app_env="test"))
 
     transport = httpx.ASGITransport(app=app)
@@ -21,11 +23,38 @@ async def test_health_reports_application_status() -> None:
         response = await client.get("/health")
 
     assert response.status_code == 200
-    assert response.json() == {
-        "status": "ok",
-        "app": "qqgroupchatbot",
-        "environment": "test",
-    }
+    body = response.json()
+    assert body["status"] in {"starting", "ready", "degraded", "stopping"}
+    assert body["app"] == "qqgroupchatbot"
+    assert body["environment"] == "test"
+    assert isinstance(body["checks"], dict)
+
+
+@pytest.mark.asyncio
+async def test_health_reports_ready_inside_lifespan() -> None:
+    app = main_module.create_app(Settings(app_env="test"))
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with app.router.lifespan_context(app):
+            response = await client.get("/health")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ready"
+    assert body["checks"]["database"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_health_reports_stopping_during_shutdown() -> None:
+    app = main_module.create_app(Settings(app_env="test"))
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with app.router.lifespan_context(app) as state:
+            pass
+        # The lifespan context manager ran the ``finally`` branch;
+        # the next probe must show ``stopping``.
+        response = await client.get("/health")
+    assert response.json()["status"] == "stopping"
 
 
 @pytest.mark.asyncio

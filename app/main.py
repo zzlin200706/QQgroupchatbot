@@ -10,7 +10,7 @@ import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.adapters.qq_official import (
     QQOfficialAuthClient,
@@ -56,9 +56,42 @@ logger = logging.getLogger(__name__)
 
 
 class HealthResponse(BaseModel):
-    status: Literal["ok"]
+    """Minimal health response for a load balancer / orchestrator probe.
+
+    The four-state machine is:
+
+      * ``starting`` — the lifespan has started but the worker has
+        not finished its first round of recovery / prune yet.
+      * ``ready`` — the bot is accepting events and the outbox
+        worker is polling.
+      * ``degraded`` — the database is reachable but at least one
+        subsystem (gateway, LLM provider, image resolver) is
+        failing.  The bot stays up so it can recover on its own.
+      * ``stopping`` — the lifespan has begun to tear down.  The
+        process is no longer safe to route traffic to.
+    """
+
+    status: Literal["starting", "ready", "degraded", "stopping"]
     app: str
     environment: str
+    checks: dict[str, str] = Field(default_factory=dict)
+
+
+async def _probe_database(database) -> str:
+    """Best-effort liveness probe for the database engine.
+
+    A simple ``SELECT 1`` round-trip; the existing engine pool and
+    busy timeout keep the probe cheap.  A failure returns
+    ``"degraded"`` so the health endpoint can mark itself as such.
+    """
+
+    from sqlalchemy import text
+    try:
+        async with database.engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
+        return "ok"
+    except Exception:
+        return "degraded"
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -345,6 +378,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
 
         application.state.database = database
+        application.state.health_status = "starting"
+        application.state.health_checks = {
+            "database": "starting",
+            "qq_adapter": "starting" if app_settings.qq_event_transport else "disabled",
+            "llm_provider": "ready" if llm_provider is not None else "disabled",
+            "vision_provider": "ready" if vision_provider is not None else "disabled",
+        }
         application.state.qq_http_client = qq_http_client
         application.state.qq_auth_client = auth_client
         application.state.qq_gateway_client = gateway_client
@@ -383,9 +423,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             group_assistant_enabled=app_settings.group_assistant_enabled,
             vision_enabled=app_settings.vision_enabled,
         )
+        # The lifespan has now wired up the database, the QQ adapter
+        # and (if applicable) the outbox worker.  Flip the health
+        # state to ``ready`` so a load-balancer probe stops sending
+        # traffic to a freshly-started replica before the worker has
+        # finished its first round of recovery + prune.
+        application.state.health_status = "ready"
         try:
             yield
         finally:
+            application.state.health_status = "stopping"
             event("bot.stopped", app_env=app_settings.app_env)
             gateway_stop.set()
             if gateway_task is not None:
@@ -427,10 +474,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @application.get("/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
+        # The four-state machine maps to the underlying lifespan
+        # state plus a quick liveness probe of the database.  We do
+        # not do a network round-trip for the LLM provider: a
+        # provider outage does not warrant removing the replica
+        # from the load balancer (the bot will recover when the
+        # provider comes back).
+        checks: dict[str, str] = dict(
+            getattr(application.state, "health_checks", {})
+        )
+        # Probe the database.  A failed probe degrades the state
+        # but does not crash the process: a transient lock or
+        # disk full should not remove the replica permanently.
+        db = getattr(application.state, "database", None)
+        if db is None:
+            database_status = "starting"
+        else:
+            try:
+                database_status = await _probe_database(db)
+            except Exception as error:
+                logger.warning(
+                    "qq official health probe database error_type=%s",
+                    type(error).__name__,
+                    exc_info=error,
+                )
+                database_status = "degraded"
+        checks["database"] = database_status
+
+        base_status = getattr(application.state, "health_status", "starting")
+        if database_status == "degraded":
+            status: Literal["starting", "ready", "degraded", "stopping"] = "degraded"
+        else:
+            status = base_status
+
         return HealthResponse(
-            status="ok",
+            status=status,
             app="qqgroupchatbot",
             environment=app_settings.app_env,
+            checks=checks,
         )
 
     @application.post("/qq-official/webhook")
