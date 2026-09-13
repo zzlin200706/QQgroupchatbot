@@ -99,3 +99,124 @@ def test_missing_app_id_or_app_secret_fails_before_network_access() -> None:
         QQOfficialAuthClient(app_id="", app_secret="secret")
     with pytest.raises(QQOfficialAuthConfigurationError, match="AppSecret"):
         QQOfficialAuthClient(app_id="id", app_secret="")
+
+
+@pytest.mark.asyncio
+async def test_access_token_is_cached_until_expiry() -> None:
+    """Subsequent calls within the lifetime reuse the cached token."""
+
+    call_count = 0
+    now = 1000.0
+
+    def clock() -> float:
+        return now
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        return httpx.Response(
+            200, json={"access_token": "t", "expires_in": 7200}
+        )
+
+    async with mock_client(httpx.MockTransport(handler)) as client:
+        auth = QQOfficialAuthClient(
+            app_id="id",
+            app_secret="secret",
+            client=client,
+            clock=clock,
+        )
+        first = await auth.fetch_access_token()
+        second = await auth.fetch_access_token()
+        third = await auth.fetch_access_token()
+
+    assert first.access_token == "t"
+    assert second.access_token == "t"
+    assert third.access_token == "t"
+    assert call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_access_token_is_refreshed_after_expiry() -> None:
+    call_count = 0
+    now = 1000.0
+
+    def clock() -> float:
+        return now
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        return httpx.Response(
+            200, json={"access_token": f"t{call_count}", "expires_in": 60}
+        )
+
+    async with mock_client(httpx.MockTransport(handler)) as client:
+        auth = QQOfficialAuthClient(
+            app_id="id",
+            app_secret="secret",
+            client=client,
+            clock=clock,
+            expiry_safety_seconds=0.0,
+        )
+        first = await auth.fetch_access_token()
+        # Jump well past expiry.
+        now = 2000.0
+        second = await auth.fetch_access_token()
+
+    assert first.access_token == "t1"
+    assert second.access_token == "t2"
+    assert call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_invalidate_forces_immediate_refresh() -> None:
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        return httpx.Response(
+            200, json={"access_token": f"t{call_count}", "expires_in": 7200}
+        )
+
+    async with mock_client(httpx.MockTransport(handler)) as client:
+        auth = QQOfficialAuthClient(
+            app_id="id", app_secret="secret", client=client
+        )
+        await auth.fetch_access_token()
+        auth.invalidate()
+        second = await auth.fetch_access_token()
+
+    assert call_count == 2
+    assert second.access_token == "t2"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_fetchers_share_one_token_request() -> None:
+    """Race two coroutines and ensure only one HTTP call wins."""
+
+    call_count = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        # Yield so a second coroutine has a chance to enter fetch_access_token.
+        await asyncio.sleep(0.01)
+        return httpx.Response(
+            200, json={"access_token": "shared", "expires_in": 7200}
+        )
+
+    import asyncio
+
+    async with mock_client(httpx.MockTransport(handler)) as client:
+        auth = QQOfficialAuthClient(
+            app_id="id", app_secret="secret", client=client
+        )
+        first, second = await asyncio.gather(
+            auth.fetch_access_token(),
+            auth.fetch_access_token(),
+        )
+
+    assert call_count == 1
+    assert first.access_token == "shared"
+    assert second.access_token == "shared"

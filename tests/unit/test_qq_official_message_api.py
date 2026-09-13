@@ -19,8 +19,14 @@ from app.adapters.qq_official.message_api import (
 
 
 class FakeAuthClient:
+    def __init__(self) -> None:
+        self.invalidate_calls = 0
+
     async def fetch_access_token(self) -> QQAccessToken:
         return QQAccessToken(access_token="test-access-token", expires_in=7200)
+
+    def invalidate(self) -> None:
+        self.invalidate_calls += 1
 
 
 @pytest.mark.asyncio
@@ -122,6 +128,7 @@ async def test_http_failures_are_mapped_by_status(
     status: int,
     error_type: type[Exception],
 ) -> None:
+    auth = FakeAuthClient()
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(
             lambda request: httpx.Response(
@@ -131,7 +138,7 @@ async def test_http_failures_are_mapped_by_status(
         )
     ) as client:
         sender = QQOfficialGroupMessageSender(
-            auth_client=FakeAuthClient(),
+            auth_client=auth,
             http_client=client,
         )
         with pytest.raises(error_type) as caught:
@@ -142,6 +149,41 @@ async def test_http_failures_are_mapped_by_status(
             )
 
     assert "test-access-token" not in str(caught.value)
+    if status == 401:
+        assert auth.invalidate_calls == 1
+    else:
+        assert auth.invalidate_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_401_response_invalidates_cached_token() -> None:
+    auth = FakeAuthClient()
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return httpx.Response(401, json={"code": 401, "message": "token bad"})
+        return httpx.Response(200, json={"id": "ok", "timestamp": 1})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        sender = QQOfficialGroupMessageSender(
+            auth_client=auth,
+            http_client=client,
+        )
+        with pytest.raises(QQOfficialMessageAPIAuthenticationError):
+            await sender.send_group_message(
+                "group-openid", "hello", msg_id="m-1"
+            )
+        # Second call retries with a fresh (still mock) token.
+        result = await sender.send_group_message(
+            "group-openid", "hello", msg_id="m-2"
+        )
+
+    assert result.message_id == "ok"
+    assert auth.invalidate_calls == 1
+    assert call_count == 2
 
 
 @pytest.mark.asyncio

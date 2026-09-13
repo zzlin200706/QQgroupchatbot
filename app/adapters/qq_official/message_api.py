@@ -75,6 +75,8 @@ class QQOfficialMessageAPIResponseError(QQOfficialMessageAPIError):
 class AccessTokenProvider(Protocol):
     async def fetch_access_token(self) -> QQAccessToken: ...
 
+    def invalidate(self) -> None: ...
+
 
 @dataclass(frozen=True)
 class QQOfficialGroupMessageSendResult:
@@ -181,7 +183,12 @@ class QQOfficialGroupMessageSender:
             ) from error
 
         if not response.is_success:
-            raise _http_error(response, access_token=access_token)
+            error = _http_error(response, access_token=access_token)
+            if response.status_code == 401:
+                # Token rejected by the API; drop the cached token so
+                # the next call forces a refresh.
+                self._auth_client.invalidate()
+            raise error
 
         try:
             data = response.json()

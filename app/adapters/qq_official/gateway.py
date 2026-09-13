@@ -51,6 +51,8 @@ class QQOfficialGatewayProtocolError(QQOfficialGatewayError):
 class AccessTokenProvider(Protocol):
     async def fetch_access_token(self) -> QQAccessToken: ...
 
+    def invalidate(self) -> None: ...
+
 
 @dataclass(frozen=True)
 class QQSessionStartLimit:
