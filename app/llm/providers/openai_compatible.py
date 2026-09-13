@@ -176,6 +176,23 @@ class OpenAICompatibleProvider:
 
             if response.status_code != 200:
                 failure = _http_error(response.status_code)
+                from app.observability import event
+                if isinstance(failure, LLMTimeoutError):
+                    event(
+                        "provider.timeout",
+                        provider="openai_compatible",
+                        model=configured_model,
+                        status=response.status_code,
+                    )
+                elif isinstance(failure, LLMProviderError):
+                    event(
+                        "provider.request_failed",
+                        level="warning",
+                        provider="openai_compatible",
+                        model=configured_model,
+                        status=response.status_code,
+                        error_type=type(failure).__name__,
+                    )
                 if response.status_code in _RETRYABLE_STATUS_CODES:
                     retry_after = _parse_retry_after(response.headers.get("Retry-After"))
                     if await self._retry(

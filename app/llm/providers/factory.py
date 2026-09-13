@@ -15,16 +15,19 @@ def create_llm_provider(
     settings: Settings,
 ) -> DeepSeekProvider | OpenAICompatibleProvider:
     provider_name = settings.llm_provider
+    from app.observability import event
     if provider_name == "deepseek":
-        return DeepSeekProvider(
+        provider = DeepSeekProvider(
             api_key=settings.deepseek_api_key.get_secret_value(),
             base_url=settings.deepseek_base_url,
             model=settings.deepseek_model,
             timeout_seconds=settings.deepseek_timeout_seconds,
             max_retries=settings.deepseek_max_retries,
         )
+        event("provider.ready", provider="deepseek", model=settings.deepseek_model)
+        return provider
     if provider_name == "openai_compatible":
-        return OpenAICompatibleProvider(
+        provider = OpenAICompatibleProvider(
             api_key=settings.openai_compatible_api_key.get_secret_value(),
             base_url=settings.openai_compatible_base_url,
             model=settings.openai_compatible_model,
@@ -38,6 +41,13 @@ def create_llm_provider(
             timeout_seconds=settings.openai_compatible_timeout_seconds,
             max_retries=settings.openai_compatible_max_retries,
         )
+        event(
+            "provider.ready",
+            provider="openai_compatible",
+            model=settings.openai_compatible_model,
+            vision_model=bool(provider.vision_model) if hasattr(provider, "vision_model") else False,
+        )
+        return provider
     raise LLMProviderConfigurationError(
         f"Unsupported LLM provider: {provider_name}"
     )

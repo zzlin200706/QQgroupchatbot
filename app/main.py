@@ -122,6 +122,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             while not gateway_stop.is_set():
                 try:
                     await gateway_client.connect()
+                    from app.observability import event as _event
+                    _event("qq.adapter_ready", transport="websocket")
                     logger.info("qq official gateway connected")
                     retry_delay = app_settings.qq_gateway_reconnect_initial_delay_seconds
                     while not gateway_stop.is_set():
@@ -130,6 +132,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             inbound_event_from_gateway_dispatch(dispatch)
                         )
                         if not result.raw_persisted:
+                            from app.observability import event as _event
+                            _event(
+                                "qq.adapter_failed",
+                                level="error",
+                                stage="raw_persistence",
+                                transport=result.transport,
+                                event_type=result.event_type,
+                            )
                             logger.error(
                                 "qq official inbound event processing failed transport=%s event_type=%s stage=raw_persistence",
                                 result.transport,
@@ -147,6 +157,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 except (QQOfficialAuthError, QQOfficialGatewayError) as error:
                     if gateway_stop.is_set():
                         break
+                    from app.observability import event as _event
+                    _event(
+                        "qq.adapter_failed",
+                        level="warning",
+                        stage="connect",
+                        error_type=type(error).__name__,
+                    )
                     logger.warning(
                         "qq official gateway loop failed error_type=%s",
                         type(error).__name__,
@@ -356,9 +373,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         application.state.normalized_message_ingestion_service = normalized_ingestion_service
         application.state.summary_repository = summary_repository
         application.state.summary_command_handler = summary_command_handler
+        from app.observability import event
+        event(
+            "bot.started",
+            app_env=app_settings.app_env,
+            transport=app_settings.qq_event_transport,
+            llm_provider=app_settings.llm_provider,
+            summary_command_enabled=app_settings.summary_command_enabled,
+            group_assistant_enabled=app_settings.group_assistant_enabled,
+            vision_enabled=app_settings.vision_enabled,
+        )
         try:
             yield
         finally:
+            event("bot.stopped", app_env=app_settings.app_env)
             gateway_stop.set()
             if gateway_task is not None:
                 gateway_task.cancel()

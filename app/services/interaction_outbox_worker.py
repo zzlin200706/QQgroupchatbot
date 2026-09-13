@@ -87,6 +87,8 @@ class InteractionOutboxWorker:
             return 0
         recovered = await self._outbox_repository.recover_stale_running()
         if recovered:
+            from app.observability import event
+            event("outbox.recovered", count=recovered)
             logger.warning(
                 "qq official outbox recovered stale running rows count=%s",
                 recovered,
@@ -108,6 +110,8 @@ class InteractionOutboxWorker:
         cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
         deleted = await self._outbox_repository.prune_terminal(older_than=cutoff)
         if deleted:
+            from app.observability import event
+            event("outbox.pruned_terminal", count=deleted, retention_days=retention_days)
             logger.info(
                 "qq official outbox pruned terminal rows count=%s retention_days=%s",
                 deleted,
@@ -135,6 +139,8 @@ class InteractionOutboxWorker:
             older_than=cutoff, chunk_size=chunk_size
         )
         if deleted:
+            from app.observability import event
+            event("outbox.pruned_raw_events", count=deleted, retention_days=retention_days)
             logger.info(
                 "qq official raw_events pruned count=%s retention_days=%s",
                 deleted,
@@ -152,6 +158,8 @@ class InteractionOutboxWorker:
                 self._worker_loop(index), name=f"qq-official-outbox-{index}"
             )
             self._tasks.add(task)
+        from app.observability import event
+        event("worker.started", num_workers=self._num_workers, max_concurrent=self._semaphore._value)  # type: ignore[attr-defined]
 
     async def stop(self) -> None:
         self._stop.set()
@@ -162,6 +170,8 @@ class InteractionOutboxWorker:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
         self._started = False
+        from app.observability import event
+        event("worker.stopped", num_workers=self._num_workers)
 
     async def _worker_loop(self, index: int) -> None:
         del index
@@ -201,6 +211,8 @@ class InteractionOutboxWorker:
                 outbox_id,
                 reason="message could not be reloaded from raw_events",
             )
+            from app.observability import event
+            event("outbox.failed", outbox_id=outbox_id, reason="message_reload_failed")
             return
 
         try:
@@ -215,10 +227,27 @@ class InteractionOutboxWorker:
             except asyncio.CancelledError:
                 raise
             except Exception as error:
-                await self._outbox_repository.requeue_for_retry(
+                requeued = await self._outbox_repository.requeue_for_retry(
                     outbox_id,
                     reason=f"handler failed: {type(error).__name__}: {error}",
                 )
+                from app.observability import event
+                if requeued is not None and requeued.status == "failed":
+                    event(
+                        "outbox.failed",
+                        outbox_id=outbox_id,
+                        interaction=interaction_name,
+                        attempts=requeued.attempt_count,
+                        error_type=type(error).__name__,
+                    )
+                else:
+                    event(
+                        "outbox.retry",
+                        outbox_id=outbox_id,
+                        interaction=interaction_name,
+                        attempts=claimed.attempt_count,
+                        error_type=type(error).__name__,
+                    )
                 return
         finally:
             try:
@@ -233,6 +262,13 @@ class InteractionOutboxWorker:
         await self._outbox_repository.mark_completed(
             outbox_id,
             response_message_id=response_message_id,
+        )
+        from app.observability import event
+        event(
+            "outbox.completed",
+            outbox_id=outbox_id,
+            interaction=interaction_name,
+            attempts=claimed.attempt_count,
         )
         del interaction_name  # silence unused warning when logging trimmed
 

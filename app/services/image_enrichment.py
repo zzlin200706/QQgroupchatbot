@@ -115,6 +115,13 @@ class ImageEnrichmentService:
         try:
             resolved = await self._resolver.resolve(image)
         except Exception as error:
+            from app.observability import event
+            event(
+                "image.fetch_failed",
+                level="warning",
+                position=image.position,
+                error_type=type(error).__name__,
+            )
             logger.warning(
                 "image resolve failed position=%s error_type=%s",
                 image.position,
@@ -128,6 +135,13 @@ class ImageEnrichmentService:
                 prompt=IMAGE_DESCRIPTION_PROMPT,
             )
         except Exception as error:
+            from app.observability import event
+            event(
+                "image.vision_failed",
+                level="warning",
+                position=image.position,
+                error_type=type(error).__name__,
+            )
             logger.warning(
                 "vision request failed position=%s error_type=%s",
                 image.position,
