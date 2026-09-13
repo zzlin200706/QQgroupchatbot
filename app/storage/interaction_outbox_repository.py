@@ -269,6 +269,36 @@ class InteractionOutboxRepository:
                 counts[status] = counts.get(status, 0) + 1
             return counts
 
+    async def prune_terminal(
+        self,
+        *,
+        older_than: datetime,
+    ) -> int:
+        """Delete 'completed' / 'failed' rows older than ``older_than``.
+
+        Pending and running rows are never deleted; they are still
+        needed for the next start to recover.  Returns the number of
+        rows deleted.
+        """
+
+        from sqlalchemy import delete
+
+        async with self._session_factory() as session:
+            async with session.begin():
+                result = await session.execute(
+                    delete(InteractionOutboxRecord).where(
+                        InteractionOutboxRecord.status.in_(
+                            [
+                                InteractionOutboxRecord.STATUS_COMPLETED,
+                                InteractionOutboxRecord.STATUS_FAILED,
+                            ]
+                        ),
+                        InteractionOutboxRecord.completed_at.is_not(None),
+                        InteractionOutboxRecord.completed_at < older_than,
+                    )
+                )
+                return int(result.rowcount or 0)
+
     @staticmethod
     def as_dict(record: InteractionOutboxRecord) -> dict[str, Any]:
         return {

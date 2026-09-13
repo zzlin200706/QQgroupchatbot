@@ -11,7 +11,7 @@ recovers from a crash" and "the bot silently loses a reply".
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
@@ -429,3 +429,75 @@ async def test_multiple_pending_rows_drain_with_concurrency_limit(env) -> None:
     assert stats["completed"] == 6
     assert stats["pending"] == 0
     assert stats["failed"] == 0
+
+
+# --- Retention ---
+
+
+@pytest.mark.asyncio
+async def test_prune_terminal_deletes_old_completed_and_failed(env) -> None:
+    """Completed / failed rows older than the cutoff are deleted."""
+
+    for i in range(3):
+        raw = await _create_row(env, payload_hash=f"h-{i}", message_id=f"m-{i}")
+        await env.outbox_repo.create_pending(
+            platform="qq_official",
+            group_id="g-1",
+            trigger_message_id=f"m-{i}",
+            interaction_name="ping",
+            source_raw_event_id=raw.id,
+        )
+    # Complete all 3.
+    for _ in range(3):
+        claimed = await env.outbox_repo.claim_next_pending()
+        assert claimed is not None
+        await env.outbox_repo.mark_completed(claimed.id, response_message_id="r")
+
+    # All 3 are completed at "now".  A cutoff in the future
+    # prunes all 3.
+    future = datetime.now(timezone.utc) + timedelta(hours=1)
+    deleted = await env.outbox_repo.prune_terminal(older_than=future)
+    assert deleted == 3
+    stats = await env.outbox_repo.stats()
+    assert stats["completed"] == 0
+
+    # Re-create and complete one row; a cutoff in the past must
+    # not delete it.
+    raw = await _create_row(env, payload_hash="h-new", message_id="m-new")
+    await env.outbox_repo.create_pending(
+        platform="qq_official",
+        group_id="g-1",
+        trigger_message_id="m-new",
+        interaction_name="ping",
+        source_raw_event_id=raw.id,
+    )
+    claimed = await env.outbox_repo.claim_next_pending()
+    assert claimed is not None
+    await env.outbox_repo.mark_completed(claimed.id, response_message_id="r")
+
+    past = datetime.now(timezone.utc) - timedelta(days=1)
+    deleted = await env.outbox_repo.prune_terminal(older_than=past)
+    assert deleted == 0
+    stats = await env.outbox_repo.stats()
+    assert stats["completed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_prune_terminal_keeps_pending_and_running(env) -> None:
+    """A retention sweep never deletes a row that is still in flight."""
+
+    raw = await _create_row(env, payload_hash="a", message_id="m-1")
+    await env.outbox_repo.create_pending(
+        platform="qq_official",
+        group_id="g-1",
+        trigger_message_id="m-1",
+        interaction_name="ping",
+        source_raw_event_id=raw.id,
+    )
+    await env.outbox_repo.claim_next_pending()  # -> running
+
+    future = datetime.now(timezone.utc) + timedelta(hours=1)
+    deleted = await env.outbox_repo.prune_terminal(older_than=future)
+    assert deleted == 0
+    stats = await env.outbox_repo.stats()
+    assert stats["running"] == 1

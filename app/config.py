@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     # A large group of users can otherwise fan out N concurrent LLM calls.
     llm_max_concurrent_interactions: int = Field(default=4, ge=1)
 
+    # Retention for the durable outbox: terminal (completed/failed)
+    # rows older than this many days are deleted on worker startup.
+    # 0 disables pruning.  Pending and running rows are never pruned.
+    interaction_outbox_retention_days: int = Field(default=7, ge=0)
+
     group_assistant_enabled: bool = False
     qa_lookback_minutes: int = Field(default=120, ge=1)
     qa_max_messages: int = Field(default=150, ge=1)

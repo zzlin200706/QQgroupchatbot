@@ -294,6 +294,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 poll_interval_seconds=0.5,
             )
             await outbox_worker.start()
+            try:
+                await outbox_worker.prune_terminal(
+                    retention_days=app_settings.interaction_outbox_retention_days
+                )
+            except Exception:
+                logger.exception(
+                    "qq official outbox retention prune failed; continuing"
+                )
         if app_settings.qq_event_transport == "websocket":
             gateway_client = QQOfficialGatewayClient(
                 auth_client=auth_client,

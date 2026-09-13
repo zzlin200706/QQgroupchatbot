@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.domain.messages import InternalMessage
@@ -92,6 +92,28 @@ class InteractionOutboxWorker:
                 recovered,
             )
         return recovered
+
+    async def prune_terminal(self, retention_days: int) -> int:
+        """Delete terminal (completed / failed) outbox rows older than the retention.
+
+        This bounds the size of the outbox table on long-running
+        installations.  The operation is idempotent and safe to call
+        from a background timer or from the lifespan.
+        """
+
+        if retention_days < 0:
+            raise ValueError("retention_days must be non-negative")
+        if retention_days == 0:
+            return 0
+        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+        deleted = await self._outbox_repository.prune_terminal(older_than=cutoff)
+        if deleted:
+            logger.info(
+                "qq official outbox pruned terminal rows count=%s retention_days=%s",
+                deleted,
+                retention_days,
+            )
+        return deleted
 
     async def start(self) -> None:
         if self._started:
