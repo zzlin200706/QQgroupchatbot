@@ -139,7 +139,7 @@ SummaryService
 → 中转站 API
 ```
 
-当前实际部署目标：
+部署配置示例（接口域名已脱敏，不是可直接使用的真实配置）：
 
 - `LLM_PROVIDER=openai_compatible`
 - `OPENAI_COMPATIBLE_BASE_URL=https://relay.example.test/v1`
