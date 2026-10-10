@@ -16,7 +16,7 @@ the state flips to ``ready``.  An orchestrator probe should treat
 
 ## Shutdown
 
-The lifespan logs ``bot.stopped`` once the teardown is committed.
+The lifespan logs ``bot.stopped`` when teardown begins.
 The teardown is bounded: the outbox worker is given
 ``qq_shutdown_drain_timeout_seconds`` (default 5s) to drain
 in-flight rows.  Rows still in ``running`` at that point are
@@ -34,21 +34,25 @@ GET /health
   "environment": "production",
   "checks": {
     "database":      "ok",                 # ok | degraded
-    "qq_adapter":    "ready",             # ready | starting | disabled
+    "qq_adapter":    "ready",             # ready | starting | degraded
+    "outbox_worker": "ready",             # ready | starting | degraded
     "llm_provider":  "ready",             # ready | disabled
     "vision_provider": "disabled"          # ready | disabled
   }
 }
 ```
 
-* ``ready`` — every subsystem answered.  Route traffic here.
+* ``ready`` — the database, adapter and outbox worker are healthy. Route traffic here.
 * ``starting`` — the lifespan is still wiring up.  A probe is
   expected to return 200; orchestrators that gate on
   ``status==ready`` should wait.
-* ``degraded`` — the database probe failed.  The bot stays up
-  so it can recover; investigate, do not replace the replica.
+* ``degraded`` — the database probe, gateway connection or outbox
+  worker failed.  The bot stays up so it can recover; investigate.
 * ``stopping`` — the lifespan is tearing down.  Drain the
   replica from the load balancer before sending ``SIGTERM``.
+
+The provider checks report whether the provider object was configured
+and constructed.  They do not perform a network health probe.
 
 ## Structured events
 
@@ -70,25 +74,24 @@ sentences.
 | `image.vision_failed` | vision provider failed | position, error_type |
 | `worker.started` | outbox worker started | num_workers, max_concurrent |
 | `worker.stopped` | outbox worker stopped | num_workers |
-| `outbox.recovered` | stale running rows moved to pending | count |
-| `outbox.retry` | a row was requeued for retry | outbox_id, interaction, attempts, error_type |
+| `outbox.recovered` | stale running rows moved to pending or failed when attempts are exhausted | count |
 | `outbox.completed` | a row transitioned to completed | outbox_id, interaction, attempts |
-| `outbox.failed` | a row hit max_attempts | outbox_id, interaction, attempts, error_type |
+| `outbox.failed` | a row transitioned to failed | outbox_id, interaction, attempts, error_type |
 | `outbox.pruned_terminal` | terminal rows pruned | count, retention_days |
-| `outbox.pruned_raw_events` | raw_events rows pruned | count, retention_days |
 
-Secrets are filtered by the global ``SecretRedactionFilter``
-installed at startup; the operator can grep for any credential
-and is guaranteed to find no match.
+Configured credentials and recognized token patterns are filtered by
+``SecretRedactionFilter`` on logging handlers installed at startup,
+including propagated records and formatted exceptions. Avoid logging
+raw payloads or credentials; filtering does not replace that rule.
 
 ## Crash recovery
 
 The interaction outbox is durable.  After a SIGTERM, SIGKILL or
-a hard process crash, a row left in ``running`` is moved back to
-``pending`` by ``InteractionOutboxWorker.recover`` on the next
-start and re-dispatched.  ``attempts`` is preserved, so a row
-that hit ``max_attempts`` and was marked ``failed`` is not
-re-dispatched.
+a hard process crash, a row left in ``running`` is recovered on
+the next start.  Rows that have attempts remaining move back to
+``pending``.  Rows that reached ``max_attempts`` are marked
+``failed`` because delivery is unconfirmed and the bot must not
+blindly call the LLM or send again.
 
 To inspect the outbox state:
 
@@ -102,42 +105,83 @@ repo = InteractionOutboxRepository(db.session_factory)
 print(await repo.stats())  # {pending, running, completed, failed}
 ```
 
+## Outbound delivery confirmation
+
+An HTTP 2xx status alone is not a successful group-message receipt.
+The sender checks the documented `err_code` (and the previously supported
+`code` / `error.code` envelopes), then requires a non-empty message `id`.
+Nonzero business codes fail even if an `id` is also present. Error codes
+and descriptions are redacted before being attached to exceptions.
+
+HTTP 201/202 indicate asynchronous acceptance, not delivery confirmed by
+this application. Until an asynchronous receipt reconciler exists, the
+sender raises an unconfirmed-response error. The command reports
+`send_failed`, and the outbox becomes terminal `failed`; this includes
+unknown delivery, not only confirmed non-delivery. A generated summary
+stays in `summaries`. Do not rerun the model, clear the durable claim, or
+manually requeue the send: a delayed platform delivery may still occur.
+
 ## Backup
 
-The database lives in a single file (``data/qqgroupchatbot.db``).
-Because the lifespan forces a WAL checkpoint on startup, the
-``.db`` file is self-contained as soon as the process has booted
-once.  A safe backup is therefore:
+The database defaults to ``data/qqgroupchatbot.db``. While it is open,
+committed writes may also reside in its WAL sidecar. Use the SQLite
+backup API to take a consistent snapshot, including while the bot runs:
 
 ```bash
-# Make sure the bot has booted at least once after the most
-# recent write.  The startup banner confirms this.
 sqlite3 data/qqgroupchatbot.db ".backup /var/backups/qqgroupchatbot-$(date +%F).db"
 ```
 
-For a hot backup while the bot is running, prefer the SQLite
-backup API over ``cp``:
+Verify a backup before relying on it (expected output: ``ok``):
 
 ```bash
-sqlite3 data/qqgroupchatbot.db ".backup /var/backups/qqgroupchatbot.db"
+sqlite3 /var/backups/qqgroupchatbot-YYYY-MM-DD.db "PRAGMA integrity_check;"
 ```
 
-Do not ``cp`` the database file while the bot is writing, unless
-the bot has been idle for at least the WAL's auto-checkpoint
-interval (default 1000 pages).
+Do not copy only the live ``.db`` file. Idle time or a startup checkpoint
+does not prove that the WAL contains no subsequent writes. Retain backups
+of all raw receipts as well as the normalized tables.
+
+## Long summary windows
+
+``SUMMARY_MAX_INPUT_CHARS`` bounds each user prompt, including the time
+range, message count, and data delimiters. The fixed system prompt is
+additional. Long windows are split at message boundaries, with every
+chunk checked before text generation starts. A single oversized message
+raises ``SummaryWindowTooLarge``; narrow the time window or increase the
+budget to fit the configured model.
+
+Synthesis receives all validated fields, including decisions, action
+items, owners, deadlines and open questions. If that prompt exceeds the
+budget, the service concatenates summaries and deduplicates structured
+fields without another model call (``finish_reason=deterministic_merge``).
+Conflicting statements remain present for review. Invalid or truncated
+model output fails the whole generation: raw and normalized messages
+remain, but no summary is persisted or sent.
+
+Prompt version ``3`` adds readable, unverified forwarded-content rules and
+continues to record the original rendered conversation length
+in ``input_chars`` and sums token usage across all generation calls.
+If any call omits a usage field, that aggregate stays unknown (``null``).
 
 ## Retention
 
+For parser v1 forward history, run
+`.venv/bin/python -m scripts.reparse_qq_official_forwards` to preview, then
+add `--apply` to append the current parser representation. Optional
+`--raw-event-id ID` limits scope. This tool requires an existing SQLite
+database; it never starts the bot or invokes providers/commands. Old
+normalized versions and raw receipts are preserved. Normal conversation
+queries choose the newest representation without duplicating history.
+Restart a running bot to load the parser/renderer/prompt changes.
+
 * ``interaction_outbox_retention_days`` (default 7) — terminal
   outbox rows older than this are deleted on worker startup.
-* ``raw_events_retention_days`` (default 30) — raw_events older
-  than this are deleted on worker startup, subject to FK safety
-  (a raw_event referenced by any ``messages`` row or by any
-  pending/running outbox row is preserved).
+* Raw events are retained permanently.  ``raw_events_retention_days``
+  is kept as a legacy setting and ignored by runtime startup.
 
-Both retention sweeps are FK-safe and idempotent.  To inspect
-how much data would be deleted by a sweep, run the prune
-manually from a Python REPL.
+The terminal outbox sweep is idempotent.  Raw-event pruning helpers
+remain test-covered for manual maintenance, but normal bot startup
+does not invoke them.
 
 ## Logs
 

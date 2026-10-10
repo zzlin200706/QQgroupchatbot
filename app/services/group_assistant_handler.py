@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
+from contextlib import nullcontext
 from enum import Enum
 from typing import Protocol
 
@@ -24,6 +25,7 @@ from app.domain.messages import (
     TextSegment,
     UnknownSegment,
 )
+from app.rendering import MessageRenderer
 from app.services.group_assistant_trigger import (
     GroupAssistantTrigger,
     detect_group_assistant_trigger,
@@ -79,9 +81,12 @@ class GroupAssistantHandler:
         cooldown_seconds: int,
         image_enrichment_service: ImageEnrichmentService | None = None,
         clock: Callable[[], float] = time.monotonic,
+        bot_user_id: str | None = None,
     ) -> None:
         if cooldown_seconds < 0:
             raise ValueError("cooldown_seconds must not be negative")
+        if bot_user_id is not None and not bot_user_id.strip():
+            raise ValueError("bot_user_id must be a non-empty string or None")
         self._service = service
         self._repository = repository
         self._sender = sender
@@ -89,18 +94,23 @@ class GroupAssistantHandler:
         self._cooldown_seconds = cooldown_seconds
         self._clock = clock
         self._image_enrichment_service = image_enrichment_service
+        self._bot_user_id = bot_user_id or None
         self._state_lock = asyncio.Lock()
         self._last_started: dict[tuple[str, str, str], float] = {}
 
     def detect(self, message: InternalMessage) -> GroupAssistantTrigger | None:
         if not self._enabled:
             return None
-        return detect_group_assistant_trigger(message)
+        return detect_group_assistant_trigger(
+            message, bot_user_id=self._bot_user_id
+        )
 
     async def handle(self, message: InternalMessage) -> GroupAssistantStatus:
         if not self._enabled:
             return GroupAssistantStatus.DISABLED
-        trigger = detect_group_assistant_trigger(message)
+        trigger = detect_group_assistant_trigger(
+            message, bot_user_id=self._bot_user_id
+        )
         if trigger is None:
             return GroupAssistantStatus.NOT_TRIGGER
         if not self._valid_context(message):
@@ -149,29 +159,12 @@ class GroupAssistantHandler:
             return GroupAssistantStatus.COOLDOWN
 
         try:
-            generation_message = message
-            generation_input = trigger.user_input
-            if (
-                trigger.trigger_type is AssistantTriggerType.MENTION_CHAT
-                and self._image_enrichment_service is not None
-            ):
-                generation_message = (
-                    await self._image_enrichment_service.enrich_messages((message,))
-                )[0]
-                enriched_trigger = detect_group_assistant_trigger(generation_message)
-                if enriched_trigger is not None:
-                    generation_input = enriched_trigger.user_input
-            unverified_platform_quote = (
-                _quoted_platform_content(generation_message)
-                if trigger.trigger_type is AssistantTriggerType.MENTION_CHAT
-                else None
+            scope = (
+                self._image_enrichment_service.request_scope(platform=message.platform, group_id=group_id)
+                if self._image_enrichment_service is not None else nullcontext()
             )
-            result = await self._service.answer(
-                mode=trigger.mode,
-                message=generation_message,
-                user_input=generation_input,
-                quoted_platform_content=unverified_platform_quote,
-            )
+            with scope:
+                result = await self._generate_answer(message, trigger)
         except Exception as error:
             logger.warning(
                 "assistant generation failed group_id=%s trigger_type=%s error_type=%s",
@@ -225,6 +218,30 @@ class GroupAssistantHandler:
             result.provider,
         )
         return GroupAssistantStatus.SUCCEEDED
+
+    async def _generate_answer(
+        self, message: InternalMessage, trigger: GroupAssistantTrigger,
+    ) -> AssistantResult:
+        generation_message = message
+        generation_input = trigger.user_input
+        if (trigger.trigger_type is AssistantTriggerType.MENTION_CHAT
+                and self._image_enrichment_service is not None):
+            # Explicitly quoted/current pictures get the shared budget before history.
+            generation_message = (await self._image_enrichment_service.enrich_messages((message,)))[0]
+            enriched_trigger = detect_group_assistant_trigger(
+                generation_message, bot_user_id=self._bot_user_id,
+            )
+            if enriched_trigger is not None:
+                generation_input = enriched_trigger.user_input
+        return await self._service.answer(
+            mode=trigger.mode,
+            message=generation_message,
+            user_input=generation_input,
+            quoted_platform_content=(
+                _quoted_platform_content(generation_message)
+                if trigger.trigger_type is AssistantTriggerType.MENTION_CHAT else None
+            ),
+        )
 
     async def _send_usage(
         self,
@@ -317,7 +334,9 @@ def _quoted_platform_content(message: InternalMessage) -> str | None:
         elif isinstance(segment, FileSegment):
             parts.append(f"[文件: {segment.name}]" if segment.name else "[文件]")
         elif isinstance(segment, ForwardSegment):
-            parts.append("[合并转发：内容未解析]")
+            parts.append(
+                MessageRenderer().render_segments((segment,), platform=message.platform)
+            )
         elif isinstance(segment, ReplySegment):
             parts.append("[引用消息]")
         elif isinstance(segment, UnknownSegment):

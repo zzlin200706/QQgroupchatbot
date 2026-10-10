@@ -1,4 +1,20 @@
-"""Deterministic assistant trigger detection over normalized messages."""
+"""Deterministic assistant trigger detection over normalized messages.
+
+Reply policy (v1.1, every rule has an explicit test):
+
+1. ``#问 ...`` exact top-level text  -> GROUNDED_QA
+2. Direct bot mention (``@bot``)     -> MENTION_CHAT
+3. Reply to one of the bot's own
+   previous messages                  -> REPLY_TO_BOT
+4. Anything else                       -> no trigger (silent)
+
+GROUNDED_QA has strict priority over MENTION_CHAT, which has
+strict priority over REPLY_TO_BOT.  Reply-to-bot detection is
+opt-in via ``bot_user_id``: when the operator has not configured
+a bot identity the function falls back to the v1.0 behaviour
+(strict mention only) so existing deployments do not silently
+start answering implicit replies.
+"""
 
 from __future__ import annotations
 
@@ -12,11 +28,13 @@ from app.domain.messages import (
     ForwardSegment,
     ImageSegment,
     InternalMessage,
-    ProvenanceSource,
     ReplySegment,
+    ResolvedMessageReference,
     TextSegment,
     UnknownSegment,
 )
+from app.domain.messages.models import ProvenanceSource
+from app.rendering import MessageRenderer
 
 
 _QA_COMMAND = re.compile(r"^\s*#问(?:\s+(.*?))?\s*$", re.DOTALL)
@@ -31,8 +49,10 @@ class GroupAssistantTrigger:
 
 def detect_group_assistant_trigger(
     message: InternalMessage,
+    *,
+    bot_user_id: str | None = None,
 ) -> GroupAssistantTrigger | None:
-    """Recognize only explicit grounded-QA or structurally verified bot mentions."""
+    """Recognize only explicit grounded-QA, bot mention, or reply-to-bot."""
 
     if message.platform != "qq_official":
         return None
@@ -47,13 +67,21 @@ def detect_group_assistant_trigger(
             user_input=qa_input,
         )
 
-    if not _is_bot_mention(message):
-        return None
-    return GroupAssistantTrigger(
-        trigger_type=AssistantTriggerType.MENTION_CHAT,
-        mode=AssistantMode.CHAT,
-        user_input=_mention_input(message),
-    )
+    if _is_bot_mention(message):
+        return GroupAssistantTrigger(
+            trigger_type=AssistantTriggerType.MENTION_CHAT,
+            mode=AssistantMode.CHAT,
+            user_input=_mention_input(message),
+        )
+
+    if _is_reply_to_bot(message, bot_user_id=bot_user_id):
+        return GroupAssistantTrigger(
+            trigger_type=AssistantTriggerType.REPLY_TO_BOT,
+            mode=AssistantMode.CHAT,
+            user_input=_reply_input(message),
+        )
+
+    return None
 
 
 def _qa_input(message: InternalMessage) -> str | None:
@@ -84,7 +112,44 @@ def _is_bot_mention(message: InternalMessage) -> bool:
     )
 
 
+def _is_reply_to_bot(
+    message: InternalMessage, *, bot_user_id: str | None
+) -> bool:
+    """True if the message is a reply to a previous bot message.
+
+    A reply is only eligible when (a) the bot identity is known
+    (``bot_user_id`` is not empty), (b) the message contains a
+    top-level ``ReplySegment`` with a resolved message reference,
+    and (c) that referenced message was authored by the bot.
+    """
+
+    if not bot_user_id:
+        return False
+    return any(
+        _reply_targets_bot(segment, bot_user_id=bot_user_id)
+        for segment in message.segments
+        if isinstance(segment, ReplySegment)
+    )
+
+
+def _reply_targets_bot(
+    segment: ReplySegment, *, bot_user_id: str
+) -> bool:
+    resolved: ResolvedMessageReference | None = segment.resolved_message
+    if resolved is None:
+        return False
+    return resolved.author.user_id == bot_user_id
+
+
 def _mention_input(message: InternalMessage) -> str:
+    return _render_visible_segments(message)
+
+
+def _reply_input(message: InternalMessage) -> str:
+    return _render_visible_segments(message)
+
+
+def _render_visible_segments(message: InternalMessage) -> str:
     parts: list[str] = []
     for segment in sorted(message.segments, key=lambda value: value.position):
         if isinstance(segment, TextSegment):
@@ -108,7 +173,9 @@ def _mention_input(message: InternalMessage) -> str:
         elif isinstance(segment, ReplySegment):
             continue
         elif isinstance(segment, ForwardSegment):
-            parts.append("[合并转发：内容未解析]")
+            parts.append(
+                MessageRenderer().render_segments((segment,), platform=message.platform)
+            )
         elif isinstance(segment, UnknownSegment):
             parts.append("[未知消息类型]")
     return "".join(parts).strip()

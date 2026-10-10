@@ -10,8 +10,8 @@ The worker is the consumer side of the durable outbox.  It:
   * runs the existing ``QQOfficialInteractionDispatcher.handle``;
   * on success, records the QQ response and transitions the outbox
     row to ``completed``;
-  * on a retryable failure, transitions to ``pending`` (or to
-    ``failed`` if ``attempt_count >= max_attempts``);
+  * records handler failures as ``failed`` without replaying an
+    operation whose outbound delivery may be unknown;
   * on ``asyncio.CancelledError`` leaves the row in ``running`` so a
     restart can recover it.
 
@@ -27,9 +27,15 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
-from typing import Any
 
+from app.domain.assistant_interactions import (
+    AssistantTriggerType,
+    StoredAssistantInteraction,
+)
 from app.domain.messages import InternalMessage
+from app.parsers import QQOfficialMessageParser
+from app.services.command_status import CommandStatus
+from app.services.group_assistant_handler import GroupAssistantStatus
 from app.storage.assistant_interaction_repository import AssistantInteractionRepository
 from app.storage.database import Database
 from app.storage.interaction_outbox_repository import InteractionOutboxRepository
@@ -57,11 +63,13 @@ class InteractionOutboxWorker:
         raw_event_repository: RawEventRepository,
         interaction_repository: AssistantInteractionRepository | None,
         on_handle: HandleCallable,
+        message_parser: QQOfficialMessageParser | None = None,
         database: "Database | None" = None,
         max_concurrent: int = 4,
         num_workers: int = 1,
         poll_interval_seconds: float = 0.5,
         recover_on_start: bool = True,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         if max_concurrent < 1:
             raise ValueError("max_concurrent must be at least one")
@@ -74,14 +82,25 @@ class InteractionOutboxWorker:
         self._raw_event_repository = raw_event_repository
         self._interaction_repository = interaction_repository
         self._on_handle = on_handle
+        self._message_parser = message_parser or QQOfficialMessageParser()
         self._database = database
         self._num_workers = num_workers
         self._poll_interval_seconds = poll_interval_seconds
         self._recover_on_start = recover_on_start
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._tasks: set[asyncio.Task[None]] = set()
         self._stop = asyncio.Event()
         self._started = False
+
+    @property
+    def is_running(self) -> bool:
+        return (
+            self._started
+            and not self._stop.is_set()
+            and len(self._tasks) == self._num_workers
+            and all(not task.done() for task in self._tasks)
+        )
 
     async def recover(self) -> int:
         """Move stale ``running`` rows back to ``pending`` at startup."""
@@ -154,7 +173,7 @@ class InteractionOutboxWorker:
     async def start(self) -> None:
         if self._started:
             return
-        self._started = True
+        self._stop.clear()
         # Force a WAL checkpoint so the worker starts against a
         # consistent database file.  Cheap on a quiet system and
         # bounds the WAL size on a busy one.
@@ -169,54 +188,81 @@ class InteractionOutboxWorker:
                 self._worker_loop(index), name=f"qq-official-outbox-{index}"
             )
             self._tasks.add(task)
+        self._started = True
         from app.observability import event
         event("worker.started", num_workers=self._num_workers, max_concurrent=self._semaphore._value)  # type: ignore[attr-defined]
 
-    async def stop(self) -> None:
+    async def stop(self, *, drain_timeout_seconds: float = 0.0) -> None:
+        """Stop claiming work, allow a bounded drain, then cancel leftovers."""
+
+        if drain_timeout_seconds < 0:
+            raise ValueError("drain_timeout_seconds must be non-negative")
         self._stop.set()
         tasks = tuple(self._tasks)
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        self._tasks.clear()
-        self._started = False
+        try:
+            if tasks and drain_timeout_seconds:
+                await asyncio.wait(tasks, timeout=drain_timeout_seconds)
+        finally:
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            self._tasks.clear()
+            self._started = False
         from app.observability import event
         event("worker.stopped", num_workers=self._num_workers)
 
     async def _worker_loop(self, index: int) -> None:
         del index
         while not self._stop.is_set():
-            claimed = await self._outbox_repository.claim_next_pending()
+            try:
+                claimed = await self._outbox_repository.claim_next_pending()
+            except Exception as error:
+                logger.warning(
+                    "qq official outbox claim failed error_type=%s",
+                    type(error).__name__,
+                )
+                await self._wait_for_work()
+                continue
             if claimed is None:
-                try:
-                    await asyncio.wait_for(
-                        self._stop.wait(), timeout=self._poll_interval_seconds
-                    )
-                except asyncio.TimeoutError:
-                    pass
+                await self._wait_for_work()
                 continue
             try:
                 await self._run_claimed_row(claimed)
             except asyncio.CancelledError:
                 raise
             except Exception as error:
-                # The inner call already attempted requeue/mark-failed
-                # where appropriate; this is a defence-in-depth catch
-                # so a bug does not kill the worker loop.
-                logger.exception(
-                    "qq official outbox worker caught unhandled error outbox_id=%s",
+                # Delivery or its persistence may already have happened.
+                # Keep 'running' for startup reconciliation, never replay
+                # the handler merely because recording its outcome failed.
+                logger.warning(
+                    "qq official outbox outcome unconfirmed outbox_id=%s error_type=%s",
                     claimed.id,
+                    type(error).__name__,
+                    exc_info=error,
                 )
-                await self._outbox_repository.requeue_for_retry(
-                    claimed.id,
-                    reason=f"worker loop unhandled: {type(error).__name__}: {error}",
-                )
+                await self._wait_for_work()
+
+    async def _wait_for_work(self) -> None:
+        try:
+            await asyncio.wait_for(
+                self._stop.wait(), timeout=self._poll_interval_seconds
+            )
+        except asyncio.TimeoutError:
+            pass
 
     async def _run_claimed_row(self, claimed: InteractionOutboxRecord) -> None:
         outbox_id = claimed.id
         interaction_name = claimed.interaction_name
-        message = await self._load_message(claimed)
+        try:
+            message = await self._load_message(claimed)
+        except Exception as error:
+            # No handler has run, so retrying only this read is safe.
+            await self._outbox_repository.requeue_for_retry(
+                outbox_id, reason=f"message reload failed: {type(error).__name__}"
+            )
+            await self._wait_for_work()
+            return
         if message is None:
             await self._outbox_repository.mark_failed(
                 outbox_id,
@@ -226,50 +272,54 @@ class InteractionOutboxWorker:
             event("outbox.failed", outbox_id=outbox_id, reason="message_reload_failed")
             return
 
-        try:
-            await self._semaphore.acquire()
-        except asyncio.CancelledError:
-            # Leave the row in 'running'; the next restart recovers it.
-            raise
-
-        try:
+        async with self._semaphore:
+            delivered = await self._delivered_interaction(claimed)
+            if delivered is not None:
+                await self._outbox_repository.mark_completed(
+                    outbox_id,
+                    response_message_id=delivered.interaction.response_message_id,
+                )
+                return
+            timestamp = message.timestamp
+            if timestamp is None or timestamp.utcoffset() is None:
+                await self._outbox_repository.mark_failed(
+                    outbox_id, reason="trigger timestamp unavailable"
+                )
+                return
+            if self._clock() - timestamp >= timedelta(minutes=5):
+                await self._outbox_repository.mark_failed(
+                    outbox_id, reason="passive reply window expired before execution"
+                )
+                return
             try:
-                await self._on_handle(message)
+                outcome = await self._on_handle(message)
             except asyncio.CancelledError:
                 raise
             except Exception as error:
-                requeued = await self._outbox_repository.requeue_for_retry(
+                await self._outbox_repository.mark_failed(
                     outbox_id,
-                    reason=f"handler failed: {type(error).__name__}: {error}",
+                    reason=f"handler raised {type(error).__name__}; delivery unconfirmed; automatic retry disabled",
                 )
-                from app.observability import event
-                if requeued is not None and requeued.status == "failed":
-                    event(
-                        "outbox.failed",
-                        outbox_id=outbox_id,
-                        interaction=interaction_name,
-                        attempts=requeued.attempt_count,
-                        error_type=type(error).__name__,
-                    )
-                else:
-                    event(
-                        "outbox.retry",
-                        outbox_id=outbox_id,
-                        interaction=interaction_name,
-                        attempts=claimed.attempt_count,
-                        error_type=type(error).__name__,
-                    )
                 return
-        finally:
-            try:
-                self._semaphore.release()
-            except ValueError:
-                logger.exception(
-                    "qq official outbox semaphore over-release outbox_id=%s",
-                    outbox_id,
-                )
 
-        response_message_id = await self._response_message_id(claimed, message)
+            if not isinstance(outcome, (CommandStatus, GroupAssistantStatus)):
+                reason = "handler returned no recognized outcome; delivery unconfirmed"
+            elif outcome.value == "duplicate":
+                reason = "trigger already claimed without confirmed delivery; automatic retry disabled"
+            elif outcome.value not in {"succeeded", "usage_sent"}:
+                reason = f"handler returned {outcome.value}; automatic retry disabled"
+            else:
+                reason = None
+            if reason is not None:
+                await self._outbox_repository.mark_failed(
+                    outbox_id, reason=reason
+                )
+                return
+
+        delivered = await self._delivered_interaction(claimed)
+        response_message_id = (
+            None if delivered is None else delivered.interaction.response_message_id
+        )
         await self._outbox_repository.mark_completed(
             outbox_id,
             response_message_id=response_message_id,
@@ -304,29 +354,24 @@ class InteractionOutboxWorker:
                 return decode_message(message_record, list(node_records))
 
         # Fall back: re-parse the raw payload.
-        from app.parsers.qq_official_message_parser import QQOfficialMessageParser
         raw_event = await self._raw_event_repository.get_by_id(claimed.source_raw_event_id)
         if raw_event is None:
             return None
-        parser = QQOfficialMessageParser()
-        return parser.parse(
+        return self._message_parser.parse(
             raw_event.raw_payload, raw_event_id=claimed.source_raw_event_id
         )
 
-    async def _response_message_id(
-        self, claimed: InteractionOutboxRecord, message: InternalMessage
-    ) -> str | None:
+    async def _delivered_interaction(
+        self, claimed: InteractionOutboxRecord
+    ) -> StoredAssistantInteraction | None:
         if (
-            claimed.interaction_name in {"grounded_qa", "mention_chat"}
+            claimed.interaction_name in {trigger.value for trigger in AssistantTriggerType}
             and self._interaction_repository is not None
         ):
-            rows = await self._interaction_repository.list_recent_for_group(
+            return await self._interaction_repository.find_for_trigger(
                 platform=claimed.platform,
                 group_id=claimed.group_id,
-                start_time=datetime(1970, 1, 1, tzinfo=timezone.utc),
-                before_time=datetime.now(timezone.utc),
-                limit=1,
+                trigger_message_id=claimed.trigger_message_id,
+                trigger_type=AssistantTriggerType(claimed.interaction_name),
             )
-            if rows:
-                return rows[0].interaction.response_message_id
         return None

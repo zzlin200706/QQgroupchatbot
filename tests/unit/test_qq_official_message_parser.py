@@ -23,7 +23,7 @@ from app.domain.messages import (
 from app.parsers import QQOfficialMessageParser
 
 
-SAMPLES_DIRECTORY = Path(__file__).parents[2] / "data" / "qq_official_samples"
+SAMPLES_DIRECTORY = Path(__file__).parents[1] / "fixtures" / "qq_official" / "captured"
 SMOKE_FIXTURES_DIRECTORY = Path(__file__).parents[1] / "fixtures" / "qq_official"
 MANIFEST_PATH = SAMPLES_DIRECTORY / "manifest.json"
 
@@ -212,7 +212,8 @@ def test_real_reply_ref_idx_stays_out_of_platform_message_id_namespace() -> None
     reply = message.segments[0]
     assert isinstance(reply, ReplySegment)
     assert reply.referenced_message_id is None
-    assert reply.reference_key == "REFIDX_fixture_quote=="
+    assert reply.reference_key == event["data"]["msg_elements"][0]["msg_idx"]
+    assert reply.reference_key.startswith("REFIDX_")
     assert event["data"]["msg_elements"][0]["msg_idx"] != event["data"]["id"]
 
 
@@ -282,7 +283,10 @@ def test_parse_real_forward_sample() -> None:
     assert segment.resolved is False
     assert segment.resolution_status is ForwardResolutionStatus.UNRESOLVED
     assert segment.nodes == ()
-    assert segment.content == ()
+    assert len(segment.content) == 1
+    assert isinstance(segment.content[0], TextSegment)
+    assert segment.content[0].text == event["data"]["content"]
+    assert segment.content[0].raw_data == event["data"]["content"]
     assert segment.raw_data == event["data"]
 
 
@@ -305,7 +309,10 @@ def test_captured_message_type_102_stays_unresolved_without_fabricating_forward_
     assert segment.resolved is False
     assert segment.resolution_status is ForwardResolutionStatus.UNRESOLVED
     assert segment.nodes == ()
-    assert segment.content == ()
+    assert len(segment.content) == 1
+    assert isinstance(segment.content[0], TextSegment)
+    assert segment.content[0].text == event["data"]["content"]
+    assert segment.content[0].raw_data == event["data"]["content"]
     assert segment.raw_data == event["data"]
 
 

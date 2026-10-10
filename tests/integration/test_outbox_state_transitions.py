@@ -16,6 +16,11 @@ from datetime import datetime, timedelta, timezone
 import pytest
 import pytest_asyncio
 
+from app.domain.assistant_interactions import (
+    AssistantInteraction,
+    AssistantResult,
+    AssistantTriggerType,
+)
 from app.domain.messages import (
     IdentityAvailability,
     IdentityRef,
@@ -27,6 +32,9 @@ from app.domain.messages import (
     TextSegment,
 )
 from app.services.interaction_outbox_worker import InteractionOutboxWorker
+from app.services.command_status import CommandStatus
+from app.services.group_assistant_handler import GroupAssistantStatus
+from app.storage.assistant_interaction_repository import AssistantInteractionRepository
 from app.storage.database import Database
 from app.storage.interaction_outbox_repository import InteractionOutboxRepository
 from app.storage.models import RawEvent
@@ -41,7 +49,7 @@ def _valid_payload(message_id: str = "m-1") -> dict:
         "t": "GROUP_MESSAGE_CREATE",
         "d": {
             "id": message_id,
-            "timestamp": "2026-08-11T12:00:00+08:00",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "group_openid": "g-1",
             "message_type": 0,
             "author": {"id": "user-1", "member_openid": "user-1"},
@@ -226,8 +234,9 @@ async def test_recovered_row_is_dispatched_by_fresh_worker(env) -> None:
     # Phase 2: process B starts, recovers the row, dispatches it.
     handle_calls: list[InternalMessage] = []
 
-    async def handle(message: InternalMessage) -> None:
+    async def handle(message: InternalMessage) -> CommandStatus:
         handle_calls.append(message)
+        return CommandStatus.SUCCEEDED
 
     worker = InteractionOutboxWorker(
         session_factory=env.database.session_factory,
@@ -299,8 +308,9 @@ async def test_completed_row_is_not_redispatched(env) -> None:
     # A second worker starts and should find nothing to do.
     handle_calls: list[InternalMessage] = []
 
-    async def handle(message: InternalMessage) -> None:
+    async def handle(message: InternalMessage) -> CommandStatus:
         handle_calls.append(message)
+        return CommandStatus.SUCCEEDED
 
     worker = InteractionOutboxWorker(
         session_factory=env.database.session_factory,
@@ -348,8 +358,9 @@ async def test_max_attempts_terminates_at_failed_state(env) -> None:
     # A subsequent worker must not pick it up.
     handle_calls: list[InternalMessage] = []
 
-    async def handle(message: InternalMessage) -> None:
+    async def handle(message: InternalMessage) -> CommandStatus:
         handle_calls.append(message)
+        return CommandStatus.SUCCEEDED
 
     worker = InteractionOutboxWorker(
         session_factory=env.database.session_factory,
@@ -390,7 +401,7 @@ async def test_multiple_pending_rows_drain_with_concurrency_limit(env) -> None:
     peak_concurrent = 0
     counter_lock = asyncio.Lock()
 
-    async def handle(message: InternalMessage) -> None:
+    async def handle(message: InternalMessage) -> CommandStatus:
         nonlocal concurrent_now, peak_concurrent
         async with counter_lock:
             concurrent_now += 1
@@ -401,6 +412,7 @@ async def test_multiple_pending_rows_drain_with_concurrency_limit(env) -> None:
         await asyncio.sleep(0.05)
         async with counter_lock:
             concurrent_now -= 1
+        return CommandStatus.SUCCEEDED
 
     worker = InteractionOutboxWorker(
         session_factory=env.database.session_factory,
@@ -501,3 +513,230 @@ async def test_prune_terminal_keeps_pending_and_running(env) -> None:
     assert deleted == 0
     stats = await env.outbox_repo.stats()
     assert stats["running"] == 1
+
+
+def _worker(env, handle, **kwargs) -> InteractionOutboxWorker:
+    return InteractionOutboxWorker(
+        session_factory=env.database.session_factory,
+        outbox_repository=env.outbox_repo,
+        raw_event_repository=env.raw_event_repo,
+        interaction_repository=AssistantInteractionRepository(env.database.session_factory),
+        on_handle=handle,
+        poll_interval_seconds=0.01,
+        **kwargs,
+    )
+
+
+async def _pending(env, *, message_id="m-1", interaction_name="summary", max_attempts=3):
+    raw = await _create_row(env, payload_hash=message_id, message_id=message_id)
+    row, _ = await env.outbox_repo.create_pending(
+        platform="qq_official",
+        group_id="g-1",
+        trigger_message_id=message_id,
+        interaction_name=interaction_name,
+        source_raw_event_id=raw.id,
+        max_attempts=max_attempts,
+    )
+    return row
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        CommandStatus.GENERATION_FAILED,
+        CommandStatus.SEND_FAILED,
+        CommandStatus.PERSISTENCE_FAILED,
+        CommandStatus.DUPLICATE,
+        CommandStatus.DISABLED,
+        CommandStatus.IN_PROGRESS,
+        GroupAssistantStatus.GENERATION_FAILED,
+        GroupAssistantStatus.SEND_FAILED,
+        GroupAssistantStatus.PERSISTENCE_FAILED,
+        GroupAssistantStatus.DUPLICATE,
+        GroupAssistantStatus.COOLDOWN,
+        None,
+    ],
+)
+async def test_handler_non_success_never_becomes_completed_or_retried(env, outcome):
+    row = await _pending(env)
+    calls = 0
+
+    async def handle(message):
+        nonlocal calls
+        calls += 1
+        return outcome
+
+    worker = _worker(env, handle)
+    await worker._run_claimed_row(await env.outbox_repo.claim_next_pending())
+    stored = await env.outbox_repo.get_by_id(row.id)
+    assert stored.status == "failed"
+    assert stored.last_error
+    assert calls == 1
+    assert await env.outbox_repo.claim_next_pending() is None
+    assert await env.raw_event_repo.get_by_id(row.source_raw_event_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_recovery_honors_attempt_limit(env):
+    row = await _pending(env, max_attempts=1)
+    await env.outbox_repo.claim_next_pending()
+    assert await env.outbox_repo.recover_stale_running() == 1
+    stored = await env.outbox_repo.get_by_id(row.id)
+    assert stored.status == "failed"
+    assert "retry limit" in stored.last_error
+    assert stored.attempt_count == 1
+    assert await env.outbox_repo.claim_next_pending() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("matching_delivery", [False, True])
+async def test_recovered_assistant_requires_delivery_for_exact_trigger(env, matching_delivery):
+    row = await _pending(env, interaction_name="mention_chat")
+    repository = AssistantInteractionRepository(env.database.session_factory)
+    timestamp = datetime.now(timezone.utc)
+    for message_id in (["m-1", "m-other"] if matching_delivery else ["m-other"]):
+        await repository.insert_successful_interaction(
+            AssistantInteraction(
+                platform="qq_official",
+                group_id="g-1",
+                trigger_type=AssistantTriggerType.MENTION_CHAT,
+                trigger_message_id=message_id,
+                trigger_timestamp=timestamp,
+                requester=_identity(),
+                question="question",
+                result=AssistantResult(
+                    answer="answer", provider="fake", model="fake", finish_reason="stop",
+                    input_chars=10, prompt_version="test", prompt_tokens=None,
+                    completion_tokens=None, total_tokens=None,
+                ),
+                response_message_id=f"response-{message_id}",
+            )
+        )
+    calls = 0
+
+    async def handle(message):
+        nonlocal calls
+        calls += 1
+        return GroupAssistantStatus.DUPLICATE
+
+    worker = _worker(env, handle)
+    await worker._run_claimed_row(await env.outbox_repo.claim_next_pending())
+    stored = await env.outbox_repo.get_by_id(row.id)
+    assert stored.status == ("completed" if matching_delivery else "failed")
+    assert stored.response_message_id == ("response-m-1" if matching_delivery else None)
+    assert calls == (0 if matching_delivery else 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("age_seconds", [299, 300, 360])
+async def test_passive_reply_deadline_checked_before_handler(env, age_seconds):
+    row = await _pending(env)
+    raw = await env.raw_event_repo.get_by_id(row.source_raw_event_id)
+    timestamp = datetime.fromisoformat(raw.raw_payload["d"]["timestamp"])
+    calls = 0
+
+    async def handle(message):
+        nonlocal calls
+        calls += 1
+        return CommandStatus.SUCCEEDED
+
+    worker = _worker(env, handle, clock=lambda: timestamp + timedelta(seconds=age_seconds))
+    await worker._run_claimed_row(await env.outbox_repo.claim_next_pending())
+    stored = await env.outbox_repo.get_by_id(row.id)
+    assert stored.status == ("completed" if age_seconds < 300 else "failed")
+    assert calls == (1 if age_seconds < 300 else 0)
+
+
+@pytest.mark.asyncio
+async def test_worker_continues_after_transient_claim_failure(env, monkeypatch):
+    await _pending(env)
+    original_claim = env.outbox_repo.claim_next_pending
+    claimed_attempts = 0
+    handled = asyncio.Event()
+
+    async def flaky_claim():
+        nonlocal claimed_attempts
+        claimed_attempts += 1
+        if claimed_attempts == 1:
+            raise RuntimeError("temporary database failure")
+        return await original_claim()
+
+    async def handle(message):
+        handled.set()
+        return CommandStatus.SUCCEEDED
+
+    monkeypatch.setattr(env.outbox_repo, "claim_next_pending", flaky_claim)
+    worker = _worker(env, handle)
+    await worker.start()
+    try:
+        await asyncio.wait_for(handled.wait(), timeout=2)
+        assert worker.is_running
+    finally:
+        await worker.stop(drain_timeout_seconds=1)
+    assert (await env.outbox_repo.stats())["completed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_completed_write_failure_never_reexecutes_handler(env, monkeypatch):
+    row = await _pending(env)
+    await _pending(env, message_id="m-2")
+    original_complete = env.outbox_repo.mark_completed
+    calls = []
+    sibling_handled = asyncio.Event()
+
+    async def flaky_complete(outbox_id, **kwargs):
+        if outbox_id == row.id:
+            raise RuntimeError("database offline after send")
+        return await original_complete(outbox_id, **kwargs)
+
+    async def handle(message):
+        calls.append(message.platform_message_id)
+        if message.platform_message_id == "m-2":
+            sibling_handled.set()
+        return CommandStatus.SUCCEEDED
+
+    monkeypatch.setattr(env.outbox_repo, "mark_completed", flaky_complete)
+    worker = _worker(env, handle)
+    await worker.start()
+    try:
+        await asyncio.wait_for(sibling_handled.wait(), timeout=2)
+        assert worker.is_running
+    finally:
+        await worker.stop(drain_timeout_seconds=1)
+    assert calls == ["m-1", "m-2"]
+    assert (await env.outbox_repo.get_by_id(row.id)).status == "running"
+    assert (await env.outbox_repo.stats())["completed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_graceful_stop_finishes_handler_then_same_worker_restarts(env):
+    await _pending(env)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def handle(message):
+        calls.append(message.platform_message_id)
+        started.set()
+        await release.wait()
+        return CommandStatus.SUCCEEDED
+
+    worker = _worker(env, handle)
+    await worker.start()
+    await asyncio.wait_for(started.wait(), timeout=2)
+    stop = asyncio.create_task(worker.stop(drain_timeout_seconds=1))
+    await asyncio.sleep(0)
+    assert not stop.done()
+    assert not worker.is_running
+    release.set()
+    await stop
+    assert (await env.outbox_repo.stats())["completed"] == 1
+    started.clear()
+    await _pending(env, message_id="m-2")
+    await worker.start()
+    assert worker.is_running
+    await asyncio.wait_for(started.wait(), timeout=2)
+    await worker.stop(drain_timeout_seconds=1)
+    assert calls == ["m-1", "m-2"]
+    assert (await env.outbox_repo.stats())["completed"] == 2

@@ -49,6 +49,7 @@ class FakeProcessor:
 def webhook_app(tmp_path: Path, *, secret: str = "test-app-secret"):
     return main_module.create_app(
         Settings(
+            _env_file=None,
             app_env="test",
             qq_event_transport="webhook",
             qq_bot_app_id="11111111",

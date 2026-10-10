@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Sequence
 from datetime import timezone, tzinfo
 
+from app.domain.messages.forward_display import redact_media_urls
 from app.domain.messages.models import IdentityAvailability, IdentityRef, InternalMessage
 from app.domain.messages.segments import (
     AtSegment,
     FileSegment,
     ForwardNode,
+    ForwardResolutionStatus,
     ForwardSegment,
     ImageSegment,
     MessageSegment,
     ReplySegment,
+    ReplyResolutionStatus,
     ResolvedMessageReference,
     TextSegment,
     UnknownSegment,
@@ -62,6 +66,22 @@ class MessageRenderer:
         names = _identity_names(messages)
         rendered = "\n".join(self._render_message(message, names) for message in messages)
         return self._truncate(rendered)
+
+    def render_segments(
+        self,
+        segments: Sequence[MessageSegment],
+        *,
+        platform: str,
+    ) -> str:
+        """Render quoted/current-message subtrees with the same forward rules."""
+
+        names: dict[tuple[str, str], str] = {}
+        _collect_segment_identities(names, segments, set())
+        return self._truncate(
+            self._render_segments(
+                segments, platform=platform, names=names, active=set()
+            )
+        )
 
     def _render_message(
         self,
@@ -122,7 +142,7 @@ class MessageRenderer:
         image_index_state: "_ImageIndexState",
     ) -> str:
         if isinstance(segment, TextSegment):
-            return segment.text or ""
+            return redact_media_urls(segment.text or "")
         if isinstance(segment, AtSegment):
             if segment.is_all:
                 return "@全体成员"
@@ -178,6 +198,10 @@ class MessageRenderer:
     ) -> str:
         resolved = segment.resolved_message
         if resolved is None:
+            if segment.resolution_status is ReplyResolutionStatus.DEPTH_LIMIT:
+                return "[引用嵌套层数达到上限，部分内容未读取]"
+            if segment.resolution_status is ReplyResolutionStatus.NODE_LIMIT:
+                return "[引用消息数量达到上限，部分内容未读取]"
             if segment.referenced_message_id is None:
                 return "[回复消息，引用ID不可用]"
             if self._include_platform_ids:
@@ -235,9 +259,22 @@ class MessageRenderer:
                 names=names,
                 active=active,
             )
+            # Legacy QQ display text includes signed attachment URLs.
+            # Preserve them in storage, but keep them out of model prompts.
+            content = _forward_display_text(content)
             nodes = tuple(segment.nodes)
-            if not segment.resolved and not nodes:
-                lines = ["[合并转发：内容未解析]"]
+            if segment.resolution_status is ForwardResolutionStatus.DEPTH_LIMIT:
+                lines = ["[合并转发：嵌套层数达到上限，内容不完整]"]
+            elif segment.resolution_status is ForwardResolutionStatus.NODE_LIMIT:
+                lines = ["[合并转发：消息数量达到上限，内容不完整]"]
+            elif segment.resolution_status is ForwardResolutionStatus.INVALID_CONTENT:
+                lines = ["[合并转发：部分内容格式无效]"]
+            elif not segment.resolved and not nodes:
+                lines = (
+                    ["[合并转发：平台展示内容，原作者与层级未核验]"]
+                    if content
+                    else ["[合并转发：内容未解析]"]
+                )
             else:
                 lines = ["[合并转发]"]
             if content:
@@ -277,6 +314,12 @@ class MessageRenderer:
             return text
         keep = self._max_chars - len(TRUNCATION_MARKER)
         return text[:keep] + TRUNCATION_MARKER
+
+
+def _forward_display_text(value: str) -> str:
+    # Presentation redaction only; do not manufacture media segments from text.
+    value = re.sub(r"https?://[^\s<>]+", "[链接已隐藏]", value, flags=re.IGNORECASE)
+    return value.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _ordered_segments(segments: Sequence[MessageSegment]) -> list[MessageSegment]:

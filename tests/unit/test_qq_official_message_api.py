@@ -6,8 +6,10 @@ import pytest
 from app.adapters.qq_official.auth import QQAccessToken
 from app.adapters.qq_official.message_api import (
     QQOfficialMessageAPIAuthenticationError,
+    QQOfficialMessageAPIBusinessError,
     QQOfficialGroupMessageSendResult,
     QQOfficialGroupMessageSender,
+    QQOfficialMessageAPIHTTPError,
     QQOfficialMessageAPINotFoundError,
     QQOfficialMessageAPIPermissionError,
     QQOfficialMessageAPIRateLimitError,
@@ -280,3 +282,99 @@ async def test_structured_http_error_redacts_access_token_and_authorization() ->
     text = str(caught.value)
     assert "test-access-token" not in text
     assert "QQBot <REDACTED>" in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [200, 201, 202])
+@pytest.mark.parametrize(
+    "error_fields",
+    [
+        {"err_code": 40034005},
+        {"code": 40034005},
+        {"code": 0, "error": {"code": 40034005}},
+    ],
+)
+async def test_business_error_is_not_a_delivery_receipt_even_with_id(
+    status: int, error_fields: dict,
+) -> None:
+    calls = []
+    auth = FakeAuthClient()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(status, json={"id": "not-delivered", **error_fields})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        sender = QQOfficialGroupMessageSender(auth_client=auth, http_client=client)
+        with pytest.raises(QQOfficialMessageAPIBusinessError) as caught:
+            await sender.send_group_message("g", "pong", msg_id="m")
+
+    assert caught.value.status_code == status
+    assert caught.value.api_code == 40034005
+    assert len(calls) == 1  # No retry of an uncertain outbound operation.
+    assert auth.invalidate_calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [201, 202])
+async def test_async_acceptance_does_not_confirm_delivery(status: int) -> None:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(status, json={"id": "pending", "err_code": 0}),
+    )) as client:
+        sender = QQOfficialGroupMessageSender(auth_client=FakeAuthClient(), http_client=client)
+        with pytest.raises(QQOfficialMessageAPIResponseError, match="not confirm delivery"):
+            await sender.send_group_message("g", "pong", msg_id="m")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", [0, "0"])
+async def test_explicit_zero_business_code_allows_valid_receipt(code: int | str) -> None:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"id": "sent", "err_code": code}),
+    )) as client:
+        sender = QQOfficialGroupMessageSender(auth_client=FakeAuthClient(), http_client=client)
+        result = await sender.send_group_message("g", "pong", msg_id="m")
+    assert result.message_id == "sent"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", [None, False, True, 0.0, "", [], {}])
+async def test_malformed_business_code_is_not_silently_accepted(code: object) -> None:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"id": "invalid", "err_code": code}),
+    )) as client:
+        sender = QQOfficialGroupMessageSender(auth_client=FakeAuthClient(), http_client=client)
+        with pytest.raises(QQOfficialMessageAPIResponseError, match="error code"):
+            await sender.send_group_message("g", "pong", msg_id="m")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [200, 429])
+async def test_documented_error_code_and_message_are_preserved_and_redacted(status: int) -> None:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(status, json={
+            "err_code": 40034005, "code": 0,
+            "message": "expired QQBot test-access-token access_token=test-access-token",
+        }),
+    )) as client:
+        sender = QQOfficialGroupMessageSender(auth_client=FakeAuthClient(), http_client=client)
+        with pytest.raises(QQOfficialMessageAPIHTTPError) as caught:
+            await sender.send_group_message("g", "pong", msg_id="m")
+    assert caught.value.api_code == 40034005
+    assert caught.value.api_message is not None
+    assert "test-access-token" not in caught.value.api_message
+    assert "test-access-token" not in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_unexpected_string_error_code_cannot_leak_credentials() -> None:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json={
+            "err_code": "token=test-access-token", "id": "not-delivered",
+        }),
+    )) as client:
+        sender = QQOfficialGroupMessageSender(auth_client=FakeAuthClient(), http_client=client)
+        with pytest.raises(QQOfficialMessageAPIBusinessError) as caught:
+            await sender.send_group_message("g", "pong", msg_id="m")
+    assert caught.value.api_code == "token=<REDACTED>"
+    assert "test-access-token" not in str(caught.value)

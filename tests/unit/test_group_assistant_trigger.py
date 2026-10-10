@@ -19,6 +19,7 @@ from app.domain.messages import (
     MessageContext,
     MessageProvenance,
     ProvenanceSource,
+    ReplyResolutionStatus,
     ReplySegment,
     TextSegment,
 )
@@ -26,7 +27,7 @@ from app.parsers.qq_official_message_parser import QQOfficialMessageParser
 from app.services.group_assistant_trigger import detect_group_assistant_trigger
 
 
-SAMPLES = Path(__file__).parents[2] / "data" / "qq_official_samples"
+SAMPLES = Path(__file__).parents[1] / "fixtures" / "qq_official" / "captured"
 
 
 def message(
@@ -216,3 +217,175 @@ def test_grounded_qa_has_precedence_over_reply_reference() -> None:
 )
 def test_ordinary_media_or_forward_is_not_an_assistant_trigger(segment: object) -> None:
     assert detect_group_assistant_trigger(message(segment)) is None
+
+
+# ---------------------------------------------------------------------------
+# Reply-to-bot trigger (Phase 6 reply policy)
+# ---------------------------------------------------------------------------
+
+
+BOT_USER_ID = "bot-openid-9001"
+OTHER_USER_ID = "member-openid-1234"
+
+
+def _identity(user_id: str) -> IdentityRef:
+    return IdentityRef(
+        platform="qq_official",
+        user_id=user_id,
+        display_name="bot" if user_id == BOT_USER_ID else "member",
+        card=None,
+        source=IdentitySource.EVENT,
+        availability=IdentityAvailability.KNOWN,
+    )
+
+
+def _resolved_reply(author_user_id: str) -> ReplySegment:
+    from app.domain.messages import ResolvedMessageReference
+
+    return ReplySegment(
+        position=0,
+        raw_data={"ref": "ok"},
+        referenced_message_id="parent-1",
+        resolution_status=ReplyResolutionStatus.RESOLVED,
+        resolved_message=ResolvedMessageReference(
+            platform_message_id="parent-1",
+            author=_identity(author_user_id),
+            timestamp=datetime(2026, 8, 11, tzinfo=timezone.utc),
+            segments=(TextSegment(0, {}, "bot's previous answer"),),
+            raw_data={"ref": "ok"},
+        ),
+    )
+
+
+def test_ordinary_group_message_without_mention_does_not_trigger() -> None:
+    assert (
+        detect_group_assistant_trigger(
+            message(TextSegment(position=0, raw_data="hi everyone", text="hi everyone")),
+            bot_user_id=BOT_USER_ID,
+        )
+        is None
+    )
+
+
+def test_reply_to_bot_with_known_bot_user_id_triggers_chat() -> None:
+    trigger = detect_group_assistant_trigger(
+        message(
+            _resolved_reply(BOT_USER_ID),
+            TextSegment(position=1, raw_data="继续展开", text="继续展开"),
+        ),
+        bot_user_id=BOT_USER_ID,
+    )
+    assert trigger is not None
+    assert trigger.trigger_type is AssistantTriggerType.REPLY_TO_BOT
+    assert trigger.mode is AssistantMode.CHAT
+    assert trigger.user_input == "继续展开"
+
+
+def test_reply_to_another_user_does_not_trigger() -> None:
+    trigger = detect_group_assistant_trigger(
+        message(
+            _resolved_reply(OTHER_USER_ID),
+            TextSegment(position=1, raw_data="赞同", text="赞同"),
+        ),
+        bot_user_id=BOT_USER_ID,
+    )
+    assert trigger is None
+
+
+def test_reply_to_bot_without_bot_user_id_falls_back_to_silent() -> None:
+    trigger = detect_group_assistant_trigger(
+        message(
+            _resolved_reply(BOT_USER_ID),
+            TextSegment(position=1, raw_data="继续展开", text="继续展开"),
+        ),
+        bot_user_id=None,
+    )
+    assert trigger is None
+
+
+def test_unresolved_reply_segment_does_not_trigger() -> None:
+    unresolved = ReplySegment(
+        position=0,
+        raw_data={"ref": "opaque"},
+        referenced_message_id=None,
+        resolution_status=ReplyResolutionStatus.UNRESOLVED,
+        resolved_message=None,
+    )
+    trigger = detect_group_assistant_trigger(
+        message(
+            unresolved,
+            TextSegment(position=1, raw_data="继续", text="继续"),
+        ),
+        bot_user_id=BOT_USER_ID,
+    )
+    assert trigger is None
+
+
+def test_grounded_qa_command_has_priority_over_reply_to_bot() -> None:
+    trigger = detect_group_assistant_trigger(
+        message(
+            _resolved_reply(BOT_USER_ID),
+            TextSegment(position=1, raw_data="#问 再确认一次", text="#问 再确认一次"),
+        ),
+        bot_user_id=BOT_USER_ID,
+    )
+    assert trigger is not None
+    assert trigger.trigger_type is AssistantTriggerType.GROUNDED_QA
+    assert trigger.user_input == "再确认一次"
+
+
+def test_mention_chat_has_priority_over_reply_to_bot() -> None:
+    trigger = detect_group_assistant_trigger(
+        message(
+            _resolved_reply(BOT_USER_ID),
+            AtSegment(
+                position=1,
+                raw_data=None,
+                target=BOT_USER_ID,
+                is_all=False,
+                display_name="bot",
+                is_self=True,
+            ),
+            TextSegment(position=2, raw_data=" please repeat", text=" please repeat"),
+        ),
+        bot_user_id=BOT_USER_ID,
+    )
+    assert trigger is not None
+    assert trigger.trigger_type is AssistantTriggerType.MENTION_CHAT
+
+
+def test_image_alone_does_not_trigger() -> None:
+    image = ImageSegment(
+        position=0,
+        raw_data={"url": "https://example.test/x.png"},
+        file="x.png",
+        url="https://cdn.example.test/x.png",
+        summary=None,
+        sub_type=None,
+        file_size=10,
+        content_type="image/png",
+    )
+    assert detect_group_assistant_trigger(message(image), bot_user_id=BOT_USER_ID) is None
+
+
+def test_text_and_image_without_mention_or_reply_does_not_trigger() -> None:
+    image = ImageSegment(
+        position=1,
+        raw_data={"url": "https://example.test/x.png"},
+        file="x.png",
+        url="https://cdn.example.test/x.png",
+        summary=None,
+        sub_type=None,
+        file_size=10,
+        content_type="image/png",
+    )
+    assert (
+        detect_group_assistant_trigger(
+            message(
+                TextSegment(position=0, raw_data="看这个", text="看这个"),
+                image,
+            ),
+            bot_user_id=BOT_USER_ID,
+        )
+        is None
+    )

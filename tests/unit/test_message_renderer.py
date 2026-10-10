@@ -31,7 +31,7 @@ from app.parsers import QQOfficialMessageParser
 from app.rendering import MessageRenderer
 
 
-QQ_SAMPLES = Path(__file__).parents[2] / "data" / "qq_official_samples"
+QQ_SAMPLES = Path(__file__).parents[1] / "fixtures" / "qq_official" / "captured"
 NOW = datetime(2026, 8, 10, 12, 13, 14, tzinfo=timezone.utc)
 
 
@@ -484,7 +484,7 @@ def test_identity_labels_timezone_and_truncation_are_explicit() -> None:
     ("filename", "expected"),
     [
         ("001_text.json", "synthetic-text-001"),
-        ("002_at_bot.json", "@Christina"),
+        ("002_at_bot.json", "@测试用户02"),
         ("004_image.json", "[图片]"),
         ("009_file.json", "[文件:"),
     ],
@@ -516,8 +516,11 @@ def test_qq_official_103_refidx_and_102_forward_are_not_reparsed() -> None:
 
     assert "[回复 [原作者不可用]: 合成引用消息正文]" in reply_text
     assert "REFIDX_" not in reply_text
-    assert forward_text.endswith("[合并转发：内容未解析]")
-    assert "[发送者]" not in forward_text
+    assert "[合并转发：平台展示内容，原作者与层级未核验]" in forward_text
+    assert "[发送者]" in forward_text
+    assert "脱敏测试正文" in forward_text
+    assert "https://" not in forward_text
+    assert "auth_token" not in forward_text
     parsed_forward = forward.segments[0]
     assert isinstance(parsed_forward, ForwardSegment)
     assert parsed_forward.nodes == ()

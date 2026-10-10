@@ -1,17 +1,16 @@
-"""Parse captured QQ Official group-message dispatches losslessly.
+"""Parse QQ Official group messages without guessing missing facts.
 
-The Phase D samples establish the currently supported shape: QQ Official event
-envelopes whose top-level ``t`` is a group message event and whose message
-payload lives in ``d``. In particular, the captured ``message_type == 102``
-messages contain only QQ-rendered text, not structured forward nodes. The
-parser deliberately keeps those as unresolved :class:`ForwardSegment` values
-instead of extracting authors, media, or nesting from the rendered text.
+Structured MsgElement lists preserve independent authors and nested forwards.
+Legacy 102 content remains readable platform display text inside an unresolved
+ForwardSegment; its presentation is never parsed into identities or media.
+Parsing performs no network I/O.
 """
 
 from __future__ import annotations
 
 import copy
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Mapping
 
@@ -27,6 +26,7 @@ from app.domain.messages.models import (
 from app.domain.messages.segments import (
     AtSegment,
     FileSegment,
+    ForwardNode,
     ForwardResolutionStatus,
     ForwardSegment,
     ImageSegment,
@@ -46,6 +46,14 @@ _MENTION_TOKEN = re.compile(r"<@([^>]+)>")
 _REFERENCE_KEY = re.compile(r"REFIDX_[A-Za-z0-9+/_=-]+")
 
 
+@dataclass
+class _ForwardParseState:
+    raw_event_id: int | None
+    parent_message_id: str | None
+    remaining_nodes: int
+    reference_depth: int = 0
+
+
 class QQOfficialMessageParser:
     """Transform one QQ Official group-message event into a message.
 
@@ -54,6 +62,21 @@ class QQOfficialMessageParser:
     repository's earlier ``gateway/data`` wrapper for backward compatibility.
     Unrelated events return ``None``.
     """
+
+    def __init__(
+        self,
+        *,
+        max_forward_depth: int = 8,
+        max_forward_nodes: int = 1000,
+    ) -> None:
+        for name, value in (
+            ("max_forward_depth", max_forward_depth),
+            ("max_forward_nodes", max_forward_nodes),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        self._max_forward_depth = max_forward_depth
+        self._max_forward_nodes = max_forward_nodes
 
     def parse(
         self,
@@ -87,39 +110,122 @@ class QQOfficialMessageParser:
             actor=actor,
             author=author,
             timestamp=_timestamp(raw_payload.get("timestamp")),
-            segments=self._parse_segments(raw_payload),
+            segments=self._parse_segments(
+                raw_payload,
+                state=_ForwardParseState(
+                    raw_event_id=raw_event_id,
+                    parent_message_id=_as_string(raw_payload.get("id")),
+                    remaining_nodes=self._max_forward_nodes,
+                ),
+                forward_depth=0,
+            ),
             provenance=provenance,
         )
 
-    def _parse_segments(self, payload: Mapping[str, Any]) -> tuple[MessageSegment, ...]:
+    def _parse_segments(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        state: _ForwardParseState,
+        forward_depth: int,
+    ) -> tuple[MessageSegment, ...]:
         message_type = _as_int(payload.get("message_type"))
         if message_type == _FORWARD_MESSAGE_TYPE:
-            # No captured 102 sample contains machine-readable nodes or node
-            # authors.  Its content is a presentation string, so parsing it
-            # would fabricate forward-node identities and tree boundaries.
-            return (
-                ForwardSegment(
-                    position=0,
-                    reference_id=None,
-                    resolved=False,
-                    resolution_status=ForwardResolutionStatus.UNRESOLVED,
-                    content=(),
-                    nodes=(),
-                    raw_data=copy.deepcopy(dict(payload)),
-                ),
-            )
+            return (self._forward_segment(payload, state=state, depth=forward_depth),)
 
         segments: list[MessageSegment] = []
         if message_type == _REPLY_MESSAGE_TYPE:
-            segments.extend(self._reply_segments(payload, start_position=len(segments)))
+            segments.extend(
+                self._reply_segments(
+                    payload,
+                    start_position=0,
+                    state=state,
+                    forward_depth=forward_depth,
+                )
+            )
         segments.extend(self._message_like_segments(payload, start_position=len(segments)))
         return tuple(segments)
+
+    def _forward_segment(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        state: _ForwardParseState,
+        depth: int,
+    ) -> ForwardSegment:
+        # Display text is readable, but never evidence for fabricated nodes,
+        # sender identities, timestamps or downloadable media.
+        content = tuple(self._message_like_segments(payload, start_position=0))
+        elements = payload.get("msg_elements")
+        nodes: list[ForwardNode] = []
+        status = ForwardResolutionStatus.UNRESOLVED
+        if elements is not None and not isinstance(elements, list):
+            status = ForwardResolutionStatus.INVALID_CONTENT
+        elif elements:
+            status = ForwardResolutionStatus.EMBEDDED
+            if depth + state.reference_depth >= self._max_forward_depth:
+                status = ForwardResolutionStatus.DEPTH_LIMIT
+            else:
+                for element in elements:
+                    if state.remaining_nodes == 0:
+                        status = ForwardResolutionStatus.NODE_LIMIT
+                        break
+                    state.remaining_nodes -= 1
+                    if isinstance(element, Mapping):
+                        author = element.get("author")
+                        node_content = self._parse_segments(
+                            element, state=state, forward_depth=depth + 1
+                        )
+                    else:
+                        status = ForwardResolutionStatus.INVALID_CONTENT
+                        author = None
+                        node_content = (
+                            UnknownSegment(
+                                position=0,
+                                original_type="forward_node",
+                                raw_data=copy.deepcopy(element),
+                            ),
+                        )
+                    nodes.append(
+                        ForwardNode(
+                            sender=_identity(
+                                author,
+                                present_source=IdentitySource.FORWARD_NODE,
+                                missing_source=IdentitySource.FORWARD_NODE,
+                            ),
+                            # MsgElement has no documented timestamp field.
+                            timestamp=None,
+                            content=node_content,
+                            provenance=MessageProvenance(
+                                source_type=(
+                                    ProvenanceSource.FORWARD_NODE
+                                    if depth == 0
+                                    else ProvenanceSource.NESTED_FORWARD_NODE
+                                ),
+                                raw_event_id=state.raw_event_id,
+                                parent_message_id=state.parent_message_id,
+                                forward_depth=depth + 1,
+                            ),
+                            raw_data=copy.deepcopy(element),
+                        )
+                    )
+        return ForwardSegment(
+            position=0,
+            reference_id=None,
+            resolved=status is ForwardResolutionStatus.EMBEDDED,
+            resolution_status=status,
+            content=content,
+            nodes=tuple(nodes),
+            raw_data=copy.deepcopy(dict(payload)),
+        )
 
     def _reply_segments(
         self,
         payload: Mapping[str, Any],
         *,
         start_position: int,
+        state: _ForwardParseState,
+        forward_depth: int,
     ) -> list[ReplySegment]:
         elements = payload.get("msg_elements")
         message_scene = payload.get("message_scene")
@@ -136,8 +242,23 @@ class QQOfficialMessageParser:
                     },
                 )
             ]
-        return [
-            ReplySegment(
+        if forward_depth + state.reference_depth >= self._max_forward_depth:
+            return [ReplySegment(
+                position=start_position, referenced_message_id=None,
+                resolution_status=ReplyResolutionStatus.DEPTH_LIMIT,
+                raw_data={"msg_elements": copy.deepcopy(elements)},
+            )]
+        replies: list[ReplySegment] = []
+        for index, element in enumerate(elements):
+            if state.remaining_nodes == 0:
+                replies.append(ReplySegment(
+                    position=start_position + index, referenced_message_id=None,
+                    resolution_status=ReplyResolutionStatus.NODE_LIMIT,
+                    raw_data={"msg_elements": copy.deepcopy(elements[index:])},
+                ))
+                break
+            state.remaining_nodes -= 1
+            replies.append(ReplySegment(
                 position=start_position + index,
                 # The observed ref_msg_idx/msg_idx values are opaque REFIDX
                 # tokens, not Gateway message IDs.
@@ -148,22 +269,38 @@ class QQOfficialMessageParser:
                     allow_scene_fallback=len(elements) == 1,
                 ),
                 resolution_status=ReplyResolutionStatus.UNRESOLVED,
-                resolved_message=self._resolved_reply_message(element),
+                resolved_message=self._resolved_reply_message(
+                    element, state=state, forward_depth=forward_depth
+                ),
                 raw_data={
                     "msg_element": copy.deepcopy(element),
                     "message_scene": copy.deepcopy(message_scene),
                 },
-            )
-            for index, element in enumerate(elements)
-        ]
+            ))
+        return replies
 
     def _resolved_reply_message(
         self,
         element: object,
+        *,
+        state: _ForwardParseState,
+        forward_depth: int,
     ) -> ResolvedMessageReference | None:
         if not isinstance(element, Mapping):
             return None
-        segments = tuple(self._message_like_segments(element, start_position=0))
+        state.reference_depth += 1
+        try:
+            if (_as_int(element.get("message_type")) == _REPLY_MESSAGE_TYPE
+                    and not element.get("msg_elements")):
+                # Real 103 MsgElements may already contain the quoted body,
+                # with no deeper reference. Do not invent another empty reply.
+                segments = tuple(self._message_like_segments(element, start_position=0))
+            else:
+                segments = self._parse_segments(
+                    element, state=state, forward_depth=forward_depth,
+                )
+        finally:
+            state.reference_depth -= 1
         if not segments:
             return None
         return ResolvedMessageReference(

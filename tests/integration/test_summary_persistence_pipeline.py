@@ -21,7 +21,7 @@ from app.storage.summary_repository import SummaryRepository
 
 
 QQ_SAMPLE = (
-    Path(__file__).parents[2] / "data" / "qq_official_samples" / "001_text.json"
+    Path(__file__).parents[1] / "fixtures" / "qq_official" / "captured" / "001_text.json"
 )
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -10,6 +11,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import app.main as main_module
 from app.config import Settings
 from app.llm import LLMRequest, LLMResponse
+from app.services.normalized_message_ingestion import QQ_OFFICIAL_PARSER_VERSION
 
 
 APP_ID = "11111111"
@@ -149,7 +151,7 @@ async def test_webhook_ordinary_message_persists_raw_and_normalized_without_repl
         text="普通消息",
         group_openid="group-a",
         author_id="user-a",
-        timestamp="2026-08-11T10:00:00+08:00",
+        timestamp=datetime.now(timezone.utc).isoformat(),
     )
 
     async with app.router.lifespan_context(app):
@@ -167,7 +169,7 @@ async def test_webhook_ordinary_message_persists_raw_and_normalized_without_repl
         normalized = await app.state.message_repository.get_by_raw_event_id(
             raw_events[0].id,
             parser_name="qq_official_message_parser",
-            parser_version="1",
+            parser_version=QQ_OFFICIAL_PARSER_VERSION,
         )
         assert normalized is not None
         assert normalized.author.user_id == "user-a"
@@ -201,7 +203,7 @@ async def test_webhook_ping_replies_without_calling_llm(
         text="#ping",
         group_openid="group-a",
         author_id="user-a",
-        timestamp="2026-08-11T10:05:00+08:00",
+        timestamp=datetime.now(timezone.utc).isoformat(),
     )
 
     async with app.router.lifespan_context(app):
@@ -218,7 +220,7 @@ async def test_webhook_ping_replies_without_calling_llm(
         normalized = await app.state.message_repository.get_by_raw_event_id(
             raw_events[0].id,
             parser_name="qq_official_message_parser",
-            parser_version="1",
+            parser_version=QQ_OFFICIAL_PARSER_VERSION,
         )
         assert normalized is not None
         assert normalized.author.user_id == "user-a"
@@ -256,7 +258,7 @@ async def test_webhook_summary_queries_current_group_only_and_replies_to_trigger
         text="A组消息：明天按计划进行测试。",
         group_openid="group-a",
         author_id="member-a",
-        timestamp="2026-08-11T10:00:00+08:00",
+        timestamp=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
     )
     history_b = _body(
         event_id="event-b",
@@ -265,7 +267,7 @@ async def test_webhook_summary_queries_current_group_only_and_replies_to_trigger
         text="B组消息：这条不应该出现在A组总结里。",
         group_openid="group-b",
         author_id="member-b",
-        timestamp="2026-08-11T10:30:00+08:00",
+        timestamp=(datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat(),
     )
     command = _body(
         event_id="event-summary",
@@ -274,7 +276,7 @@ async def test_webhook_summary_queries_current_group_only_and_replies_to_trigger
         text=" #总结 ",
         group_openid="group-a",
         author_id="member-a",
-        timestamp="2026-08-11T11:00:00+08:00",
+        timestamp=datetime.now(timezone.utc).isoformat(),
     )
 
     async with app.router.lifespan_context(app):

@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import socket
+from io import BytesIO
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Protocol
 from urllib.parse import urljoin, urlsplit
 
 import httpx
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from app.domain.images import ResolvedImage
 from app.domain.messages import ImageSegment
@@ -43,6 +45,59 @@ class ImageResourceResolver(Protocol):
 
 
 AddressResolver = Callable[[str], Awaitable[Sequence[str]]]
+
+
+def prepare_display_image(
+    image: ResolvedImage, *, max_pixels: int = 20_000_000, max_bytes: int = 10_485_760,
+) -> ResolvedImage:
+    """Decode bounded image data; normalize JPEG trailers without relaxing validation."""
+    data = image.data
+    signatures = {
+        "image/png": data.startswith(b"\x89PNG\r\n\x1a\n") and data[12:16] == b"IHDR",
+        "image/jpeg": data.startswith(b"\xff\xd8\xff"),
+        "image/gif": data.startswith((b"GIF87a", b"GIF89a")) and len(data) >= 13,
+        "image/webp": data.startswith(b"RIFF") and data[8:12] == b"WEBP" and len(data) >= 20,
+    }
+    if not signatures.get(image.content_type, False):
+        raise UnsupportedImageError("image signature does not match its content type")
+    if len(data) > max_bytes:
+        raise ImageTooLargeError("image exceeds validation byte limit")
+    formats = {"image/jpeg": "JPEG", "image/png": "PNG", "image/gif": "GIF", "image/webp": "WEBP"}
+    try:
+        with Image.open(BytesIO(data), formats=[formats[image.content_type]]) as decoded:
+            if decoded.width * decoded.height > max_pixels:
+                raise ImageTooLargeError("image exceeds pixel limit")
+            decoded.verify()
+        with Image.open(BytesIO(data), formats=[formats[image.content_type]]) as decoded:
+            # Keep Pillow's strict truncated-image behavior; never enable LOAD_TRUNCATED_IMAGES.
+            decoded.load()
+            if image.content_type == "image/jpeg" and not data.endswith(b"\xff\xd9"):
+                output = _BoundedImageBuffer(max_bytes)
+                with ImageOps.exif_transpose(decoded) as oriented:
+                    with oriented.convert("RGB") as rgb:
+                        rgb.save(output, format="JPEG", quality=95)
+                return ResolvedImage(data=output.getvalue(), content_type="image/jpeg")
+    except Image.DecompressionBombError as error:
+        raise ImageTooLargeError("image exceeds decoder pixel limit") from error
+    except (UnidentifiedImageError, OSError, ValueError, SyntaxError) as error:
+        raise UnsupportedImageError("image could not be decoded safely") from error
+    return image
+
+
+class _BoundedImageBuffer(BytesIO):
+    def __init__(self, max_bytes: int) -> None:
+        super().__init__()
+        self._max_bytes = max_bytes
+
+    def write(self, data: bytes) -> int:
+        if self.tell() + len(data) > self._max_bytes:
+            raise ImageTooLargeError("normalized image exceeds byte limit")
+        return super().write(data)
+
+
+def validate_image_signature(image: ResolvedImage) -> None:
+    """Compatibility entry point; validation now includes bounded decoding."""
+    prepare_display_image(image)
 
 
 class HttpImageResourceResolver:

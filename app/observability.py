@@ -25,12 +25,12 @@ Current event names:
   * ``worker.started``           — outbox worker started
   * ``worker.stopped``           — outbox worker stopped
   * ``worker.task_failed``       — a worker task raised
-  * ``outbox.recovered``         — stale running rows moved to pending
-  * ``outbox.retry``             — a row was requeued for retry
+  * ``outbox.recovered``         — stale running rows recovered or failed
+  * ``outbox.retry``             — a pre-handler row reload was requeued
   * ``outbox.completed``         — a row transitioned to completed
-  * ``outbox.failed``            — a row hit max_attempts and is now failed
+  * ``outbox.failed``            — a row transitioned to failed
   * ``outbox.pruned_terminal``   — terminal rows pruned
-  * ``outbox.pruned_raw_events`` — raw_events rows pruned
+  * ``outbox.pruned_raw_events`` — manual raw_events prune helper ran
 """
 
 from __future__ import annotations

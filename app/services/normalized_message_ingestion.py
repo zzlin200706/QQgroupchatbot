@@ -13,7 +13,7 @@ from app.storage.models import RawEvent
 logger = logging.getLogger(__name__)
 
 QQ_OFFICIAL_PARSER_NAME = "qq_official_message_parser"
-QQ_OFFICIAL_PARSER_VERSION = "1"
+QQ_OFFICIAL_PARSER_VERSION = "3"
 
 
 class QQOfficialNormalizedMessageIngestionService:

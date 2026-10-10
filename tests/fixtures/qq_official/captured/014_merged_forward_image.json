@@ -1,0 +1,31 @@
+{
+  "captured_at": "2026-08-10T09:26:23.415333+00:00",
+  "gateway": {
+    "op": 0,
+    "s": 2,
+    "t": "GROUP_MESSAGE_CREATE"
+  },
+  "data": {
+    "author": {
+      "bot": false,
+      "id": "fixture-identity-01",
+      "member_openid": "fixture-identity-01",
+      "member_role": "owner",
+      "union_openid": "",
+      "username": "测试用户01"
+    },
+    "content": "[群聊的聊天记录]\n=== 消息 1 ===\n[消息内容] 脱敏测试正文\n[发送者] 测试用户07\n\n=== 消息 2 ===\n[发送者] 测试用户04\n[附件1] 类型:图片 文件名:fixture-identity-21.jpg 尺寸:1260x2720 大小:881.8KB URL:https://media.example.test/redacted\n\n=== 消息 3 ===\n[消息内容] 脱敏测试正文\n[发送者] 测试用户05\n",
+    "group_id": "fixture-identity-02",
+    "group_openid": "fixture-identity-02",
+    "id": "fixture-message-22",
+    "message_scene": {
+      "ext": [
+        "msg_idx=REFIDX_fixture15==",
+        "auth_token=<REDACTED>"
+      ],
+      "source": "default"
+    },
+    "message_type": 102,
+    "timestamp": "2026-08-10T17:26:22+08:00"
+  }
+}

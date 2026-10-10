@@ -1,0 +1,42 @@
+{
+  "captured_at": "2026-08-10T09:11:53.553668+00:00",
+  "gateway": {
+    "op": 0,
+    "s": 2,
+    "t": "GROUP_MESSAGE_CREATE"
+  },
+  "data": {
+    "author": {
+      "bot": false,
+      "id": "fixture-identity-01",
+      "member_openid": "fixture-identity-01",
+      "member_role": "owner",
+      "union_openid": "",
+      "username": "测试用户01"
+    },
+    "content": "<@fixture-identity-06> synthetic-at-member-003",
+    "group_id": "fixture-identity-02",
+    "group_openid": "fixture-identity-02",
+    "id": "fixture-message-07",
+    "mentions": [
+      {
+        "bot": false,
+        "id": "fixture-identity-06",
+        "is_you": false,
+        "member_openid": "fixture-identity-06",
+        "member_role": "member",
+        "scope": "single",
+        "username": "测试用户03"
+      }
+    ],
+    "message_scene": {
+      "ext": [
+        "msg_idx=REFIDX_fixture03==",
+        "auth_token=<REDACTED>"
+      ],
+      "source": "default"
+    },
+    "message_type": 0,
+    "timestamp": "2026-08-10T17:11:52+08:00"
+  }
+}

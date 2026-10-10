@@ -68,10 +68,10 @@ class Database:
         """Force a WAL checkpoint, truncating the WAL file.
 
         A no-op for in-memory databases.  Truncating the WAL
-        reclaims disk space and ensures a subsequent ``cp`` of the
-        ``.db`` file is a self-contained snapshot (the WAL must be
-        empty for ``sqlite3 .backup`` and ``VACUUM INTO`` to
-        produce a consistent file).
+        reclaims disk space. Subsequent writes can refill the WAL,
+        so this does not make copying a live ``.db`` file safe.
+        SQLite's backup API includes committed WAL contents and does
+        not require an empty WAL.
         """
 
         if _is_sqlite_memory(self._url):

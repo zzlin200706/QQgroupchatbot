@@ -106,7 +106,7 @@ class AssistantInteractionRepository:
                     await session.refresh(record)
                 return decode_assistant_interaction(record)
         except IntegrityError:
-            existing = await self._find_for_trigger(
+            existing = await self.find_for_trigger(
                 platform=interaction.platform,
                 group_id=interaction.group_id,
                 trigger_message_id=interaction.trigger_message_id,
@@ -178,7 +178,7 @@ class AssistantInteractionRepository:
             )
             return None if record is None else decode_assistant_interaction(record)
 
-    async def _find_for_trigger(
+    async def find_for_trigger(
         self,
         *,
         platform: str,
@@ -186,6 +186,9 @@ class AssistantInteractionRepository:
         trigger_message_id: str,
         trigger_type: AssistantTriggerType,
     ) -> StoredAssistantInteraction | None:
+        """Find the delivered answer for this exact logical trigger."""
+
+        _validate_trigger_key(platform, group_id, trigger_message_id)
         async with self._session_factory() as session:
             record = await session.scalar(
                 select(AssistantInteractionRecord).where(

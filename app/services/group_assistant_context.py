@@ -98,7 +98,11 @@ class GroupAssistantContextBuilder:
             if candidate.platform_message_id != trigger.platform_message_id
         )
         if self._image_enrichment_service is not None:
-            messages = await self._image_enrichment_service.enrich_messages(messages)
+            # Spend the remaining image budget on recent history first, but keep
+            # the final conversation timeline in its original chronological order.
+            messages = tuple(reversed(await self._image_enrichment_service.enrich_messages(
+                tuple(reversed(messages)),
+            )))
         interactions: tuple[StoredAssistantInteraction, ...] = ()
         if mode is AssistantMode.CHAT:
             interactions = tuple(

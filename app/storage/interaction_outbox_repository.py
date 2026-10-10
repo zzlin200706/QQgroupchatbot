@@ -53,6 +53,9 @@ class InteractionOutboxRepository:
         so the caller can decide whether to skip the work entirely.
         """
 
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least one")
+
         try:
             async with self._session_factory() as session:
                 record = InteractionOutboxRecord(
@@ -119,6 +122,18 @@ class InteractionOutboxRepository:
         async with self._claim_lock:
             async with self._session_factory() as session:
                 async with session.begin():
+                    await session.execute(
+                        update(InteractionOutboxRecord)
+                        .where(
+                            InteractionOutboxRecord.status == InteractionOutboxRecord.STATUS_PENDING,
+                            InteractionOutboxRecord.attempt_count >= InteractionOutboxRecord.max_attempts,
+                        )
+                        .values(
+                            status=InteractionOutboxRecord.STATUS_FAILED,
+                            completed_at=datetime.now(timezone.utc),
+                            last_error="retry limit reached before claim",
+                        )
+                    )
                     row = await session.scalar(
                         select(InteractionOutboxRecord)
                         .where(InteractionOutboxRecord.status == InteractionOutboxRecord.STATUS_PENDING)
@@ -228,7 +243,7 @@ class InteractionOutboxRepository:
             return result.all()
 
     async def recover_stale_running(self) -> int:
-        """Convert stale ``running`` rows back to ``pending``.
+        """Recover stale ``running`` rows without exceeding the attempt limit.
 
         A row is considered stale when it is still ``running``; on
         startup the previous owner cannot be running any more.  The
@@ -238,6 +253,18 @@ class InteractionOutboxRepository:
 
         async with self._session_factory() as session:
             async with session.begin():
+                exhausted = await session.execute(
+                    update(InteractionOutboxRecord)
+                    .where(
+                        InteractionOutboxRecord.status == InteractionOutboxRecord.STATUS_RUNNING,
+                        InteractionOutboxRecord.attempt_count >= InteractionOutboxRecord.max_attempts,
+                    )
+                    .values(
+                        status=InteractionOutboxRecord.STATUS_FAILED,
+                        completed_at=datetime.now(timezone.utc),
+                        last_error="retry limit reached during recovery; delivery unconfirmed",
+                    )
+                )
                 result = await session.execute(
                     update(InteractionOutboxRecord)
                     .where(
@@ -249,7 +276,7 @@ class InteractionOutboxRepository:
                         started_at=None,
                     )
                 )
-                return int(result.rowcount or 0)
+                return int(result.rowcount or 0) + int(exhausted.rowcount or 0)
 
     async def raw_event_for(
         self, outbox: InteractionOutboxRecord

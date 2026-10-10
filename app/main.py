@@ -66,9 +66,8 @@ class HealthResponse(BaseModel):
         not finished its first round of recovery / prune yet.
       * ``ready`` — the bot is accepting events and the outbox
         worker is polling.
-      * ``degraded`` — the database is reachable but at least one
-        subsystem (gateway, LLM provider, image resolver) is
-        failing.  The bot stays up so it can recover on its own.
+      * ``degraded`` — the database probe, gateway connection or
+        outbox worker is failing. Remote providers are not probed.
       * ``stopping`` — the lifespan has begun to tear down.  The
         process is no longer safe to route traffic to.
     """
@@ -102,7 +101,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app_settings = settings or get_settings()
 
     @asynccontextmanager
-    async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+    async def runtime_lifespan(application: FastAPI) -> AsyncIterator[None]:
         database = Database(app_settings.database_url)
         await database.initialize()
         qq_http_client = httpx.AsyncClient(
@@ -111,9 +110,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         raw_repository = RawEventRepository(database.session_factory)
         raw_ingestion_service = QQOfficialRawEventIngestionService(raw_repository)
         message_repository = MessageRepository(database.session_factory)
+        message_parser = QQOfficialMessageParser(
+            max_forward_depth=app_settings.forward_max_depth,
+            max_forward_nodes=app_settings.forward_max_nodes,
+        )
         normalized_ingestion_service = QQOfficialNormalizedMessageIngestionService(
             repository=message_repository,
-            parser=QQOfficialMessageParser(),
+            parser=message_parser,
         )
         summary_repository = SummaryRepository(database.session_factory)
         assistant_interaction_repository = AssistantInteractionRepository(
@@ -162,7 +165,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             retry_delay = app_settings.qq_gateway_reconnect_initial_delay_seconds
             while not gateway_stop.is_set():
                 try:
+                    application.state.health_checks["qq_adapter"] = "starting"
                     await gateway_client.connect()
+                    application.state.health_checks["qq_adapter"] = "ready"
                     from app.observability import event as _event
                     _event("qq.adapter_ready", transport="websocket")
                     logger.info("qq official gateway connected")
@@ -198,6 +203,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 except (QQOfficialAuthError, QQOfficialGatewayError) as error:
                     if gateway_stop.is_set():
                         break
+                    application.state.health_checks["qq_adapter"] = "degraded"
                     from app.observability import event as _event
                     _event(
                         "qq.adapter_failed",
@@ -212,6 +218,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 except Exception:
                     if gateway_stop.is_set():
                         break
+                    application.state.health_checks["qq_adapter"] = "degraded"
                     logger.exception("qq official gateway loop crashed")
                 finally:
                     await gateway_client.close()
@@ -322,6 +329,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 enabled=True,
                 cooldown_seconds=app_settings.assistant_cooldown_seconds,
                 image_enrichment_service=image_enrichment_service,
+                # App ID is an application credential, not a verified
+                # message-author identity. Reply-only triggers stay disabled.
             )
 
         interaction_dispatcher = QQOfficialInteractionDispatcher(
@@ -335,45 +344,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             interaction_dispatcher=interaction_dispatcher,
             outbox_repository=InteractionOutboxRepository(database.session_factory),
         )
-        outbox_worker = None
-        if (
-            app_settings.summary_command_enabled
-            or app_settings.group_assistant_enabled
-        ):
-            from app.services.interaction_outbox_worker import (
-                InteractionOutboxWorker,
+        from app.services.interaction_outbox_worker import InteractionOutboxWorker
+
+        # #ping needs the same durable consumer even when every AI feature
+        # is disabled. The pool size must match the configured concurrency.
+        outbox_worker = InteractionOutboxWorker(
+            session_factory=database.session_factory,
+            outbox_repository=InteractionOutboxRepository(database.session_factory),
+            raw_event_repository=raw_repository,
+            interaction_repository=assistant_interaction_repository,
+            on_handle=interaction_dispatcher.handle,
+            message_parser=message_parser,
+            database=database,
+            max_concurrent=app_settings.llm_max_concurrent_interactions,
+            num_workers=app_settings.llm_max_concurrent_interactions,
+            poll_interval_seconds=0.5,
+        )
+        await outbox_worker.start()
+        try:
+            await outbox_worker.prune_terminal(
+                retention_days=app_settings.interaction_outbox_retention_days
             )
-            outbox_worker = InteractionOutboxWorker(
-                session_factory=database.session_factory,
-                outbox_repository=InteractionOutboxRepository(
-                    database.session_factory
-                ),
-                raw_event_repository=raw_repository,
-                interaction_repository=assistant_interaction_repository,
-                on_handle=interaction_dispatcher.handle,
-                database=database,
-                max_concurrent=app_settings.llm_max_concurrent_interactions,
-                num_workers=1,
-                poll_interval_seconds=0.5,
+        except Exception:
+            logger.exception("qq official outbox retention prune failed; continuing")
+        if app_settings.raw_events_retention_days:
+            logger.warning(
+                "RAW_EVENTS_RETENTION_DAYS is ignored: raw events are retained permanently"
             )
-            await outbox_worker.start()
-            try:
-                await outbox_worker.prune_terminal(
-                    retention_days=app_settings.interaction_outbox_retention_days
-                )
-            except Exception:
-                logger.exception(
-                    "qq official outbox retention prune failed; continuing"
-                )
-            try:
-                await outbox_worker.prune_raw_events(
-                    retention_days=app_settings.raw_events_retention_days,
-                    chunk_size=app_settings.raw_events_prune_chunk_size,
-                )
-            except Exception:
-                logger.exception(
-                    "qq official raw_events retention prune failed; continuing"
-                )
+        application.state.database = database
+        application.state.health_status = "starting"
+        application.state.health_checks = {
+            "database": "starting",
+            "qq_adapter": (
+                "ready" if app_settings.qq_event_transport == "webhook" else "starting"
+            ),
+            "llm_provider": "ready" if llm_provider is not None else "disabled",
+            "vision_provider": "ready" if vision_provider is not None else "disabled",
+        }
+
         if app_settings.qq_event_transport == "websocket":
             gateway_client = QQOfficialGatewayClient(
                 auth_client=auth_client,
@@ -390,14 +398,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 app_id=app_settings.qq_bot_app_id,
             )
 
-        application.state.database = database
-        application.state.health_status = "starting"
-        application.state.health_checks = {
-            "database": "starting",
-            "qq_adapter": "starting" if app_settings.qq_event_transport else "disabled",
-            "llm_provider": "ready" if llm_provider is not None else "disabled",
-            "vision_provider": "ready" if vision_provider is not None else "disabled",
-        }
         application.state.qq_http_client = qq_http_client
         application.state.qq_auth_client = auth_client
         application.state.qq_gateway_client = gateway_client
@@ -460,8 +460,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if outbox_worker is not None:
                 try:
                     await asyncio.wait_for(
-                        outbox_worker.stop(),
-                        timeout=app_settings.qq_shutdown_drain_timeout_seconds,
+                        outbox_worker.stop(
+                            drain_timeout_seconds=app_settings.qq_shutdown_drain_timeout_seconds
+                        ),
+                        timeout=app_settings.qq_shutdown_drain_timeout_seconds + 1,
                     )
                 except asyncio.TimeoutError:
                     logger.warning(
@@ -478,6 +480,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await llm_provider.aclose()
             await qq_http_client.aclose()
             await database.dispose()
+
+    @asynccontextmanager
+    async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+        # ASGI entry points also need redaction; they do not call main().
+        from app.log_redaction import install_secret_redaction
+
+        _configure_logging(app_settings.log_level)
+        redaction = install_secret_redaction((
+            app_settings.qq_bot_app_secret,
+            app_settings.deepseek_api_key.get_secret_value(),
+            app_settings.openai_compatible_api_key.get_secret_value(),
+        ))
+        root = logging.getLogger()
+        handlers = tuple(root.handlers)
+        try:
+            async with runtime_lifespan(application):
+                yield
+        finally:
+            root.removeFilter(redaction)
+            for handler in handlers:
+                handler.removeFilter(redaction)
 
     application = FastAPI(
         title="qqgroupchatbot",
@@ -513,10 +536,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
                 database_status = "degraded"
         checks["database"] = database_status
+        worker = getattr(application.state, "qq_outbox_worker", None)
+        checks["outbox_worker"] = (
+            "starting" if worker is None else "ready" if worker.is_running else "degraded"
+        )
 
         base_status = getattr(application.state, "health_status", "starting")
-        if database_status == "degraded":
-            status: Literal["starting", "ready", "degraded", "stopping"] = "degraded"
+        if base_status == "stopping":
+            status: Literal["starting", "ready", "degraded", "stopping"] = "stopping"
+        elif "degraded" in checks.values():
+            status = "degraded"
+        elif "starting" in checks.values():
+            status = "starting"
         else:
             status = base_status
 
@@ -604,12 +635,7 @@ def _configure_logging(log_level: str, *, secrets: tuple[str, ...] = ()) -> None
 
 def main() -> None:
     settings = get_settings()
-    secrets = (
-        settings.qq_bot_app_secret,
-        settings.deepseek_api_key.get_secret_value(),
-        settings.openai_compatible_api_key.get_secret_value(),
-    )
-    _configure_logging(settings.log_level, secrets=secrets)
+    _configure_logging(settings.log_level)
     uvicorn.run(app, host=settings.api_host, port=settings.api_port)
 
 

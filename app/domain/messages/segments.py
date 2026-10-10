@@ -52,6 +52,8 @@ class ReplyResolutionStatus(str, Enum):
     INVALID_REFERENCE = "invalid_reference"
     FETCH_FAILED = "fetch_failed"
     INVALID_RESPONSE = "invalid_response"
+    DEPTH_LIMIT = "depth_limit"
+    NODE_LIMIT = "node_limit"
 
 
 @dataclass(frozen=True)

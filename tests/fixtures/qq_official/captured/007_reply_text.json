@@ -1,0 +1,39 @@
+{
+  "captured_at": "2026-08-10T09:21:25.133884+00:00",
+  "gateway": {
+    "op": 0,
+    "s": 2,
+    "t": "GROUP_MESSAGE_CREATE"
+  },
+  "data": {
+    "author": {
+      "bot": false,
+      "id": "fixture-identity-01",
+      "member_openid": "fixture-identity-01",
+      "member_role": "owner",
+      "union_openid": "",
+      "username": "测试用户01"
+    },
+    "content": " synthetic-reply-text-006",
+    "group_id": "fixture-identity-02",
+    "group_openid": "fixture-identity-02",
+    "id": "fixture-message-11",
+    "message_scene": {
+      "ext": [
+        "ref_msg_idx=REFIDX_fixture07==",
+        "msg_idx=REFIDX_fixture08==",
+        "auth_token=<REDACTED>"
+      ],
+      "source": "default"
+    },
+    "message_type": 103,
+    "msg_elements": [
+      {
+        "content": "合成引用消息正文",
+        "message_type": 103,
+        "msg_idx": "REFIDX_fixture07=="
+      }
+    ],
+    "timestamp": "2026-08-10T17:21:24+08:00"
+  }
+}

@@ -71,7 +71,7 @@ def _valid_payload(message_id: str = "message-1") -> dict:
         "t": "GROUP_MESSAGE_CREATE",
         "d": {
             "id": message_id,
-            "timestamp": "2026-08-11T12:00:00+08:00",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "group_openid": "g-1",
             "message_type": 0,
             "author": {"id": "user-1", "member_openid": "user-1"},

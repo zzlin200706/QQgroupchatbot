@@ -29,6 +29,7 @@ from app.adapters.qq_official.inbound import (
 )
 from app.adapters.qq_official.message_api import (
     QQOfficialMessageAPIAuthenticationError,
+    QQOfficialMessageAPIBusinessError,
     QQOfficialGroupMessageSendResult,
     QQOfficialGroupMessageSender,
     QQOfficialMessageAPIError,
@@ -78,6 +79,7 @@ __all__ = [
     "QQOfficialGroupMessageSendResult",
     "QQOfficialGroupMessageSender",
     "QQOfficialMessageAPIAuthenticationError",
+    "QQOfficialMessageAPIBusinessError",
     "QQOfficialMessageAPIError",
     "QQOfficialMessageAPIHTTPError",
     "QQOfficialMessageAPINotFoundError",

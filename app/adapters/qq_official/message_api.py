@@ -20,7 +20,7 @@ class QQOfficialMessageAPIError(RuntimeError):
 
 
 class QQOfficialMessageAPIHTTPError(QQOfficialMessageAPIError):
-    """Outbound OpenAPI returned a non-success HTTP status."""
+    """Outbound OpenAPI returned an HTTP or business-level error."""
 
     def __init__(
         self,
@@ -34,6 +34,10 @@ class QQOfficialMessageAPIHTTPError(QQOfficialMessageAPIError):
         self.status_code = status_code
         self.api_code = api_code
         self.api_message = api_message
+
+
+class QQOfficialMessageAPIBusinessError(QQOfficialMessageAPIHTTPError):
+    """A 2xx response contains a nonzero business error code."""
 
 
 class QQOfficialMessageAPIAuthenticationError(QQOfficialMessageAPIHTTPError):
@@ -69,7 +73,7 @@ class QQOfficialMessageAPITimeoutError(QQOfficialMessageAPITransportError):
 
 
 class QQOfficialMessageAPIResponseError(QQOfficialMessageAPIError):
-    """Outbound OpenAPI returned an invalid success payload."""
+    """Outbound OpenAPI returned an invalid or unconfirmed success payload."""
 
 
 class AccessTokenProvider(Protocol):
@@ -196,6 +200,20 @@ class QQOfficialGroupMessageSender:
             raise QQOfficialMessageAPIResponseError(
                 "QQ Official group message response was not valid JSON"
             ) from error
+        codes = _response_error_codes(data)
+        if any(_error_code(code) is None for code in codes):
+            raise QQOfficialMessageAPIResponseError(
+                "QQ Official group message response contained an invalid error code"
+            )
+        if any(code not in (0, "0") for code in codes):
+            raise _http_error(response, access_token=access_token)
+        # The API guide describes 201/202 as asynchronous acceptance.  We
+        # have no receipt reconciler, so neither an id nor a zero code here
+        # is enough to mark the outbox delivered.  Do not retry the send.
+        if response.status_code in (201, 202):
+            raise QQOfficialMessageAPIResponseError(
+                "QQ Official asynchronous response does not confirm delivery"
+            )
         return _parse_send_result(data)
 
 
@@ -227,7 +245,9 @@ def _http_error(
     if detail.message:
         message += f" message={detail.message}"
 
-    if response.status_code == 401:
+    if response.is_success:
+        error_type = QQOfficialMessageAPIBusinessError
+    elif response.status_code == 401:
         error_type = QQOfficialMessageAPIAuthenticationError
     elif response.status_code == 403:
         error_type = QQOfficialMessageAPIPermissionError
@@ -258,22 +278,44 @@ def _error_detail(
         return QQOfficialMessageAPIErrorDetail(code=None, message=None)
     if not isinstance(payload, Mapping):
         return QQOfficialMessageAPIErrorDetail(code=None, message=None)
+    codes = [_error_code(value) for value in _response_error_codes(payload)]
+    code = next((value for value in codes if value not in (None, 0, "0")), None)
+    if code is None:
+        code = next((value for value in codes if value is not None), None)
+    if isinstance(code, str):
+        code = _sanitize(code, access_token=access_token)
+    nested_error = payload.get("error")
+    message = _error_message(payload, access_token=access_token)
+    if message is None and isinstance(nested_error, Mapping):
+        message = _error_message(nested_error, access_token=access_token)
+    return QQOfficialMessageAPIErrorDetail(
+        code=code,
+        message=message,
+    )
+
+
+def _response_error_codes(payload: object) -> list[object]:
+    if not isinstance(payload, Mapping):
+        return []
+    # err_code is the current documented field.  Keep support for the
+    # previously handled code/error.code envelopes without letting a
+    # top-level zero mask a nested failure.
+    envelopes = [payload]
     nested_error = payload.get("error")
     if isinstance(nested_error, Mapping):
-        return QQOfficialMessageAPIErrorDetail(
-            code=_error_code(payload.get("code") or nested_error.get("code")),
-            message=_error_message(nested_error, access_token=access_token),
-        )
-    return QQOfficialMessageAPIErrorDetail(
-        code=_error_code(payload.get("code")),
-        message=_error_message(payload, access_token=access_token),
-    )
+        envelopes.append(nested_error)
+    return [
+        envelope[key]
+        for envelope in envelopes
+        for key in ("err_code", "code")
+        if key in envelope
+    ]
 
 
 def _error_code(value: object) -> str | int | None:
     if isinstance(value, bool):
         return None
-    if isinstance(value, (str, int)):
+    if isinstance(value, int) or (isinstance(value, str) and value.strip()):
         return value
     return None
 

@@ -1,0 +1,31 @@
+{
+  "captured_at": "2026-08-10T09:27:03.231386+00:00",
+  "gateway": {
+    "op": 0,
+    "s": 2,
+    "t": "GROUP_MESSAGE_CREATE"
+  },
+  "data": {
+    "author": {
+      "bot": false,
+      "id": "fixture-identity-01",
+      "member_openid": "fixture-identity-01",
+      "member_role": "owner",
+      "union_openid": "",
+      "username": "测试用户01"
+    },
+    "content": "[群聊的聊天记录]\n=== 消息 1 ===\n[消息内容] [群聊的聊天记录]\n[发送者] 测试用户04\n[消息类型] 合并转发消息\n[关联消息]\n--- 第1条 ---\n    [发送者] 测试用户08\n    [附件1] 类型:图片 文件名:fixture-identity-23.jpg 尺寸:2392x1080 大小:1.2MB URL:https://media.example.test/redacted\n--- 第2条 ---\n    [消息内容] 脱敏测试正文\n    [发送者] 测试用户08\n--- 第3条 ---\n    [消息内容] 脱敏测试正文\n    [发送者] 测试用户08\n\n=== 消息 2 ===\n[消息内容] [群聊的聊天记录]\n[发送者] 测试用户01\n[消息类型] 合并转发消息\n[关联消息]\n--- 第1条 ---\n    [发送者] 测试用户09\n    [附件1] 类型:图片 文件名:fixture-identity-24.jpg 尺寸:1178x860 大小:110.7KB URL:https://media.example.test/redacted\n--- 第2条 ---\n    [消息内容] 脱敏测试正文\n    [发送者] 测试用户09\n    [附件1] 类型:图片 文件名:fixture-identity-25.jpg 尺寸:120x120 大小:3.1KB URL:https://media.example.test/redacted\n--- 第3条 ---\n    [消息内容] \r脱敏测试正文\n    [发送者] 测试用户09\n--- 第4条 ---\n    [消息内容] \r脱敏测试正文\n    [发送者] 测试用户09\n--- 第5条 ---\n    [消息内容] \r脱敏测试正文\n    [发送者] 测试用户09\n",
+    "group_id": "fixture-identity-02",
+    "group_openid": "fixture-identity-02",
+    "id": "fixture-message-26",
+    "message_scene": {
+      "ext": [
+        "msg_idx=REFIDX_fixture16==",
+        "auth_token=<REDACTED>"
+      ],
+      "source": "default"
+    },
+    "message_type": 102,
+    "timestamp": "2026-08-10T17:27:02+08:00"
+  }
+}

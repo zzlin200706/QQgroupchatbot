@@ -35,6 +35,7 @@ from app.llm.providers.base import (
     LLMTimeoutError,
 )
 from app.services.interaction_outbox_worker import InteractionOutboxWorker
+from app.services.command_status import CommandStatus
 from app.storage.database import Database
 from app.storage.interaction_outbox_repository import InteractionOutboxRepository
 from app.storage.models import RawEvent
@@ -49,7 +50,7 @@ def _valid_payload(message_id: str = "m-1") -> dict:
         "t": "GROUP_MESSAGE_CREATE",
         "d": {
             "id": message_id,
-            "timestamp": "2026-08-11T12:00:00+08:00",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "group_openid": "g-1",
             "message_type": 0,
             "author": {"id": "user-1", "member_openid": "user-1"},
@@ -145,7 +146,7 @@ def _build_worker(
 
 
 @pytest.mark.asyncio
-async def test_provider_timeout_is_retried(env) -> None:
+async def test_unhandled_provider_timeout_is_not_blindly_retried(env) -> None:
     raw = await _create_row(env, payload_hash="a", message_id="m-1")
     await env.outbox_repo.create_pending(
         platform="qq_official",
@@ -162,21 +163,21 @@ async def test_provider_timeout_is_retried(env) -> None:
         call_count += 1
         if call_count <= 2:
             raise LLMTimeoutError("simulated timeout")
-        return None
+        return CommandStatus.SUCCEEDED
 
     worker = _build_worker(env, handle)
     await worker.start()
     try:
-        async def is_completed() -> bool:
+        async def is_failed() -> bool:
             stats = await env.outbox_repo.stats()
-            return stats["completed"] == 1
+            return stats["failed"] == 1
 
-        await _wait_until(is_completed, timeout=5.0)
+        await _wait_until(is_failed, timeout=5.0)
     finally:
         await worker.stop()
-    assert call_count == 3  # two failures + one success
+    assert call_count == 1
     stats = await env.outbox_repo.stats()
-    assert stats["completed"] == 1
+    assert stats["failed"] == 1
     assert stats["pending"] == 0
 
 
@@ -203,10 +204,6 @@ async def test_provider_auth_error_fails_immediately(env) -> None:
     worker = _build_worker(env, handle)
     await worker.start()
     try:
-        # The auth error is treated as a regular failure and
-        # requeued, but each retry also fails.  We assert that
-        # after the retry limit the row is in 'failed' and that
-        # handle was called exactly max_attempts times.
         async def is_failed() -> bool:
             stats = await env.outbox_repo.stats()
             return stats["failed"] == 1
@@ -214,7 +211,7 @@ async def test_provider_auth_error_fails_immediately(env) -> None:
         await _wait_until(is_failed, timeout=5.0)
     finally:
         await worker.stop()
-    assert call_count == 3
+    assert call_count == 1
     stats = await env.outbox_repo.stats()
     assert stats["failed"] == 1
 
@@ -243,7 +240,7 @@ async def test_one_failing_request_does_not_block_others(env) -> None:
         seen.append(m.platform_message_id or "")
         if m.platform_message_id == "m-2":
             raise LLMProviderError("poison")
-        return None
+        return CommandStatus.SUCCEEDED
 
     worker = _build_worker(env, handle, max_concurrent=2)
     await worker.start()
@@ -358,6 +355,7 @@ async def test_mid_flight_crash_then_restart_completes(env) -> None:
 
     async def finishing_handle(m):
         handle_b_calls.append(m.platform_message_id or "")
+        return CommandStatus.SUCCEEDED
 
     worker_b = InteractionOutboxWorker(
         session_factory=env.database.session_factory,

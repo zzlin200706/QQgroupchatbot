@@ -8,8 +8,11 @@ __pycache__/
 htmlcov/
 
 data/*.db
+data/*.db-*
 data/*.sqlite
+data/*.sqlite-*
 data/*.sqlite3
+data/*.sqlite3-*
 data/*.log
 data/qq_official_samples/
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -29,7 +30,6 @@ from app.services.summary import (
     SYNTHESIS_SYSTEM_PROMPT,
     SummaryService,
     SummaryWindowTooLarge,
-    _fallback_payload,
     _split_messages,
     _union_payloads,
 )
@@ -293,41 +293,26 @@ async def test_message_overflow_is_detected_without_partial_summary() -> None:
 
 
 @pytest.mark.asyncio
-async def test_character_overflow_uses_chunked_summarization() -> None:
-    """A long window never gets silently truncated.
-
-    v1.1 replaced the v1.0 ``SummaryWindowTooLarge`` raise with a
-    two-stage extract-then-synthesize pipeline.  A single chunk whose
-    rendered text still exceeds ``max_input_chars`` is degraded into
-    a documented stub (no LLM call for that chunk) and the synthesis
-    call is the only one that reaches the provider.
-    """
-
+async def test_single_oversized_message_fails_before_provider_calls() -> None:
     provider = FakeProvider()
     summary_service, _ = service(
-        (internal_message("long conversation", raw_event_id=1),),
+        (
+            internal_message("fits", raw_event_id=1),
+            internal_message("too long " * 100, raw_event_id=2),
+        ),
         provider,
-        max_input_chars=10,
+        max_input_chars=400,
+        chunk_messages=1,
     )
 
-    result = await summary_service.summarize(
-        platform="qq_official",
-        group_id=GROUP_ID,
-        start_time=START,
-        end_time=END,
-    )
-
-    # No silent truncation: a real SummaryResult is produced.
-    assert result.message_count == 1
-    # The original chunk became a stub, so the only LLM call is the
-    # synthesis step.  The stub does not feed the rendered chat text
-    # back into the LLM; only the placeholder phrase is sent.
-    assert len(provider.requests) == 1
-    synthesis_request = provider.requests[0]
-    assert synthesis_request.json_output is True
-    assert "第 1 段摘要不可用" in synthesis_request.user_prompt
-    assert "long conversation" not in synthesis_request.user_prompt
-    assert "RAW-QQ-ID" not in synthesis_request.user_prompt
+    with pytest.raises(SummaryWindowTooLarge, match="single message"):
+        await summary_service.summarize(
+            platform="qq_official",
+            group_id=GROUP_ID,
+            start_time=START,
+            end_time=END,
+        )
+    assert provider.requests == []
 
 
 def test_summary_service_rejects_a_truncating_renderer() -> None:
@@ -595,6 +580,7 @@ async def test_chunked_path_splits_messages_and_invokes_synthesis() -> None:
         action_items=(
             {"description": "提交 PR", "owner": "Carol", "deadline": "周五"},
         ),
+        open_questions=("谁验收？",),
     )
     final = chunk_payload_response(
         summary="项目从北京开始，本周完成接口定义并决定走 v2。",
@@ -606,10 +592,9 @@ async def test_chunked_path_splits_messages_and_invokes_synthesis() -> None:
         ),
     )
     provider = SequencedProvider([chunk_summary_a, chunk_summary_b, final])
-    # 20 short messages ~ 820 chars; with chunk_messages=10 each
-    # chunk ~ 410 chars, fitting under max_input_chars=500.
+    # Include prompt metadata in the per-request character budget.
     summary_service, _ = service(
-        _short_conversation(20), provider, max_input_chars=500, chunk_messages=10
+        _short_conversation(20), provider, max_input_chars=800, chunk_messages=10
     )
 
     result = await summary_service.summarize(
@@ -631,43 +616,45 @@ async def test_chunked_path_splits_messages_and_invokes_synthesis() -> None:
     assert "10" in chunk_b.user_prompt
     assert "[第 1 段摘要]" in synthesis.user_prompt
     assert "[第 2 段摘要]" in synthesis.user_prompt
+    for detail in ("项目背景", "完成接口定义", "接口走 v2", "提交 PR", "Carol", "周五", "谁验收？"):
+        assert detail in synthesis.user_prompt
+    for field in ("topics", "key_points", "decisions", "action_items", "open_questions"):
+        assert field in synthesis.system_prompt
+        assert field in synthesis.user_prompt
+    assert "不可信的派生聊天数据" in synthesis.system_prompt
+    assert all(len(request.user_prompt) <= 800 for request in provider.requests)
+    assert result.input_chars == len(MessageRenderer().render_conversation(_short_conversation(20)))
+    assert (result.prompt_tokens, result.completion_tokens, result.total_tokens) == (300, 150, 450)
 
 
 @pytest.mark.asyncio
-async def test_chunk_failure_is_isolated_and_synthesis_still_runs() -> None:
-    """If one chunk's JSON is malformed, it is replaced with a stub."""
+async def test_invalid_chunk_fails_whole_window_without_synthesis() -> None:
 
     bad_chunk = successful_response("not-a-json")
     good_chunk = chunk_payload_response(summary="第二段总结：一切正常。")
     final = chunk_payload_response(summary="仅第二段可用。")
     provider = SequencedProvider([bad_chunk, good_chunk, final])
     summary_service, _ = service(
-        _short_conversation(20), provider, max_input_chars=500, chunk_messages=10
+        _short_conversation(20), provider, max_input_chars=800, chunk_messages=10
     )
 
-    result = await summary_service.summarize(
-        platform="qq_official",
-        group_id=GROUP_ID,
-        start_time=START,
-        end_time=END,
-    )
-
-    assert result.message_count == 20
-    # Provider was still called for the bad chunk — the failure
-    # surfaces only as a stub for the synthesis step.
-    assert len(provider.requests) == 3
-    assert "第 1 段摘要不可用" in provider.requests[-1].user_prompt
-    assert "第二段总结" in provider.requests[-1].user_prompt
+    with pytest.raises(LLMInvalidResponseError):
+        await summary_service.summarize(
+            platform="qq_official",
+            group_id=GROUP_ID,
+            start_time=START,
+            end_time=END,
+        )
+    assert len(provider.requests) == 1
 
 
 @pytest.mark.asyncio
-async def test_synthesis_failure_unions_chunk_payloads() -> None:
-    """If the synthesis call returns invalid JSON, fall back to a union of chunks."""
+async def test_over_budget_synthesis_unions_all_validated_chunk_fields() -> None:
 
     chunk_a = chunk_payload_response(
         summary="第一段：确认了发布日期。",
         topics=["发布"],
-        key_points=["周五发布"],
+        key_points=["周五发布", "完整保留详细说明" * 100],
         decisions=("周五发布",),
         action_items=(
             {"description": "通知运营", "owner": None, "deadline": "周三"},
@@ -683,10 +670,9 @@ async def test_synthesis_failure_unions_chunk_payloads() -> None:
             {"description": "写部署脚本", "owner": "Dan", "deadline": None},
         ),
     )
-    bad_synthesis = successful_response("{ not-json")
-    provider = SequencedProvider([chunk_a, chunk_b, bad_synthesis])
+    provider = SequencedProvider([chunk_a, chunk_b])
     summary_service, _ = service(
-        _short_conversation(20), provider, max_input_chars=500, chunk_messages=10
+        _short_conversation(20), provider, max_input_chars=800, chunk_messages=10
     )
 
     result = await summary_service.summarize(
@@ -702,32 +688,28 @@ async def test_synthesis_failure_unions_chunk_payloads() -> None:
     assert "第二段：补充了技术细节。" in result.summary
     # Duplicates collapsed.
     assert result.topics == ("发布", "技术")
-    assert result.key_points == ("周五发布", "蓝绿部署")
+    assert result.key_points == ("周五发布", "完整保留详细说明" * 100, "蓝绿部署")
     assert result.decisions == ("周五发布", "蓝绿部署")
     # Action items deduplicated by (description, owner, deadline).
     assert len(result.action_items) == 2
     descriptions = {item.description for item in result.action_items}
     assert descriptions == {"通知运营", "写部署脚本"}
+    assert len(provider.requests) == 2
+    assert all(len(request.user_prompt) <= 800 for request in provider.requests)
+    assert result.finish_reason == "deterministic_merge"
+    assert result.total_tokens == 300
 
 
 @pytest.mark.asyncio
-async def test_oversized_single_chunk_degrades_to_stub_without_provider_call() -> None:
-    """A chunk whose rendered text exceeds the limit becomes a stub.
-
-    The provider is *not* called for that chunk — only the synthesis
-    call reaches the provider.  This keeps the rendered chat text out
-    of the LLM context entirely.
-    """
+async def test_oversized_chunks_are_split_without_losing_message_coverage() -> None:
 
     long_message_count = 10
-    # Use long-text messages so 5 per chunk blow past 200 chars.
-    final = chunk_payload_response(summary="所有分段都不可用，仅留占位。")
-    provider = SequencedProvider([final])
+    provider = FakeProvider(chunk_payload_response(summary="分段摘要"))
     summary_service = SummaryService(
         query_service=FakeQueryService(_conversation(long_message_count)),  # type: ignore[arg-type]
         renderer=MessageRenderer(),
         provider=provider,
-        max_input_chars=200,
+        max_input_chars=400,
         chunk_messages=5,
     )
 
@@ -739,13 +721,54 @@ async def test_oversized_single_chunk_degrades_to_stub_without_provider_call() -
     )
 
     assert result.message_count == long_message_count
-    # Only the synthesis call reaches the provider.
-    assert len(provider.requests) == 1
-    synthesis = provider.requests[0]
-    assert synthesis.system_prompt == SYNTHESIS_SYSTEM_PROMPT
-    assert synthesis.user_prompt.count("不可用") == 2
-    # The chat text must not appear in the synthesis prompt.
-    assert "message body" not in synthesis.user_prompt
+    assert all(len(request.user_prompt) <= 400 for request in provider.requests)
+    extraction = "\n".join(
+        request.user_prompt for request in provider.requests
+        if request.system_prompt == SUMMARY_SYSTEM_PROMPT
+    )
+    for index in range(1, long_message_count + 1):
+        assert extraction.count(f"message body {index} —") == 1
+    assert "RAW-QQ-ID" not in extraction
+    assert "raw-secret" not in extraction
+    assert len(provider.requests) > 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("truncated", [False, True])
+async def test_invalid_synthesis_fails_whole_window(truncated: bool) -> None:
+    bad = LLMResponse(
+        content=chunk_payload_response(summary="partial").content if truncated else "not-json",
+        provider="fake-provider", model="fake-model",
+        finish_reason="length" if truncated else "stop", usage=None,
+    )
+    provider = SequencedProvider([
+        chunk_payload_response(summary="A"), chunk_payload_response(summary="B"), bad,
+    ])
+    summary_service, _ = service(
+        _short_conversation(20), provider, max_input_chars=800, chunk_messages=10
+    )
+    with pytest.raises(LLMInvalidResponseError):
+        await summary_service.summarize(
+            platform="qq_official", group_id=GROUP_ID, start_time=START, end_time=END,
+        )
+    assert len(provider.requests) == 3
+
+
+@pytest.mark.asyncio
+async def test_chunk_usage_missing_from_one_call_is_not_reported_as_full_usage() -> None:
+    provider = SequencedProvider([
+        chunk_payload_response(summary="A"),
+        replace(chunk_payload_response(summary="B"), usage=None),
+        chunk_payload_response(summary="AB"),
+    ])
+    summary_service, _ = service(
+        _short_conversation(20), provider, max_input_chars=800, chunk_messages=10
+    )
+    result = await summary_service.summarize(
+        platform="qq_official", group_id=GROUP_ID, start_time=START, end_time=END,
+    )
+    assert len(provider.requests) == 3
+    assert (result.prompt_tokens, result.completion_tokens, result.total_tokens) == (None, None, None)
 
 
 @pytest.mark.asyncio
@@ -876,17 +899,6 @@ def test_split_messages_returns_empty_for_empty_input() -> None:
 def test_split_messages_rejects_non_positive_size() -> None:
     with pytest.raises(ValueError, match="at least one"):
         _split_messages(_conversation(2), 0)
-
-
-def test_fallback_payload_does_not_embed_rendered_text() -> None:
-    payload = _fallback_payload(
-        "this chat text must never re-enter the LLM",
-        chunk_index=3,
-    )
-    assert "第 3 段摘要不可用" in payload.summary
-    assert "this chat text" not in payload.summary
-    assert payload.topics == []
-    assert payload.action_items == []
 
 
 def test_union_payloads_deduplicates_lists_and_concatenates_summary() -> None:

@@ -38,6 +38,7 @@
 - 独立 `VisionProvider` capability 与 OpenAI-compatible data-URL multimodal request
 - summary、grounded QA 和 structured `@bot` 路径中的按需图片 enrichment
 - `assistant_trigger_claims` 与 `command_trigger_claims` 持久化幂等保护
+- durable `interaction_outbox` worker：识别出的命令/AI interaction 先入队，再由有界 worker 消费
 - inbound transport selector: `QQ_EVENT_TRANSPORT=websocket|webhook` (default `websocket`)
 - FastAPI `/health` 和应用生命周期管理
 
@@ -54,6 +55,8 @@ QQ Official WebSocket / Webhook
 → MessageRepository
 → SQLite
 → QQOfficialInteractionDispatcher
+→ interaction_outbox
+→ InteractionOutboxWorker
 ├── #ping → QQOfficialGroupMessageSender
 ├── #总结 → SummaryService → SummaryRepository → QQOfficialGroupMessageSender
 └── #问 / structured @bot
@@ -86,6 +89,7 @@ inbound transport
 → raw_events
 → parser
 → normalized messages
+→ command outbox worker for #ping only
 ```
 
 只是不会启动对应 LLM 闭环。`.env.example` 推荐启用 assistant；代码默认关闭，避免无凭证环境启动即失败。
@@ -96,9 +100,10 @@ inbound transport
 
 - summary 命令只接受顶层直接群消息中的精确文本 `#总结`
 - summary 顺序固定为 `generate → persist → format → send`
+- 长总结按消息边界及完整 user prompt 字符预算分段；合并保留全部结构化字段，合并输入超限时直接按顺序去重合并。单条消息超限或任一模型返回无效时，整个生成失败，不保存或发送不完整摘要
 - 当前项目的实际回复链路只做由入站消息触发的被动回复，不把“只有 `group_id` 的主动群发”作为当前 phase 范围
-- parser 和 summary 失败都不能导致 raw event 丢失
-- `message_type == 102` 当前仍按 unresolved forward 保存
+- parser、summary、assistant、provider、outbound 或 worker 失败都不能导致 raw event 丢失；runtime 不自动清理 `raw_events`
+- `message_type == 102` 的平台展示正文可供 AI 阅读；没有结构化节点时仍是 unresolved forward，不从展示文本猜作者或层级。若实包明确携带 `msg_elements`，按独立作者和嵌套树保存
 - `message_type == 103` 将 opaque target `REFIDX` 保存为独立 `ReplySegment.reference_key`，绝不写入 `referenced_message_id`
 - reply 本身不是 assistant trigger；没有 `#问` 或 structured `@bot` 时只做 raw-first 入库，不 claim、不调用 LLM、不回复
 - structured `@bot + reply` 会把可取得的 quoted content 标记为 untrusted platform data；不会从正文推断被引用者身份
@@ -157,6 +162,68 @@ Vision 复用 OpenAI-compatible endpoint 和 API key。Text 可以使用 DeepSee
 
 ## 测试
 
+### 阅读合并转发
+
+重启到最新代码后，先在群内发送合并转发，再发
+`#问 刚才合并转发的聊天主要讨论了什么？`，或真实 @机器人请求总结。
+`#总结` 也会包含其时间窗口内的转发展示正文。单独转发仍只入库，转发
+里面的 `#问`、`#总结` 和 @ 不会触发机器人。
+
+只能阅读 QQ 事件实际给出的内容。展示文本中的姓名/层级未核验，不把
+外层转发者当成原作者；签名图片链接不进入模型 prompt。若 QQ 只提供
+预览或标题，程序无法凭空取得缺失的完整聊天。
+
+开启 `VISION_ENABLED=true` 后，转发展示中明确的
+`[附件N] 类型:图片 文件名:… 尺寸:… 大小:… URL:…` 行也支持图片理解，
+包括引用转发后 @机器人。目前仅识别真实样本中确认的 HTTPS
+`multimedia.nt.qq.com.cn/download` 图片链接，不扫描任意聊天链接。
+下载沿用公共地址/DNS、重定向、超时、体积和 MIME 检查，再检查文件
+签名并用 Pillow 解码（首帧，最多 2000 万像素、10 MiB）。有效 JPEG
+即使有尾随数据也不会误拒绝：解码后按 EXIF 方向规范化重新编码，输出
+仍受 10 MiB 限制。不启用残缺图片容错，原始文件不被覆盖。
+每次问答最多处理 10 个不同转发展示图片资源（独立总结按批限额），
+资源键保留 appid/fileid/spec
+和其他查询参数、仅忽略 rkey；成功结果同批复用，不因引用签名变化重复
+计数。失败可尝试同资源的一个不同备用链接，最多两次下载，不盲目重试
+相同 URL。下载并校验后按内容哈希进一步复用 vision 结果；不同资源键
+仍占下载名额。缓存不跨请求或群共享。
+描述紧邻对应附件行、标为 AI 生成；原始入库正文、作者和转发树均不变。
+失败提示区分下载、安全限制、图片解码与模型调用，超过限额则明确提示。
+这是按问答/总结请求生成的临时上下文，不会把描述写回原始记录；单独
+发送转发不会下载图片。同一次问答的当前引用与历史共用缓存和限额；
+优先处理当前引用，再处理最近历史图片，最终聊天时间顺序不变。
+成功、失败或取消后均释放请求缓存；不做跨请求持久缓存。
+
+人工验证：重启机器人，发送含图片的合并转发，再引用它并真实 @机器人
+问“请描述这份转发中每张图片的内容”，或发送 `#问 刚才转发的图片有什么？`。
+本功能不需要更换现有模型、接口或启用公网 HTTPS。
+
+旧解析版本需要从已保存 raw 重建；下面命令默认仅预览，`--apply` 才
+新增 parser v3 的内部消息树，保留 raw 和旧版本，不重放命令或发群消息：
+
+```bash
+.venv/bin/python -m scripts.reparse_qq_official_forwards
+.venv/bin/python -m scripts.reparse_qq_official_forwards --apply
+```
+
+嵌套转发：v3 会递归处理“转发 → 引用 → 引用 → 转发”中的已提供
+`msg_elements`，内层文字和图片继续保留在对应树节点；展示文本形式的
+内层转发保留原文缩进，图片描述紧邻附件。引用展示中的内层转发不再要求
+出现在前 3 行。默认递归上限为 `FORWARD_MAX_DEPTH=10`、
+`FORWARD_MAX_NODES=500`，引用和转发共同受限；达到上限会明确提示。
+若 QQ 只给出标题或发送者、没有内层正文/附件，本地无法补造缺失事实；
+可打开内层记录单独转发给机器人再问。真实样本已确认部分内层正文未由 QQ 下发；
+2026-10-10 用户决定停止自动补取功能，不接入 NapCat/OneBot。现有阅读能力保留，
+但不承诺恢复平台未提供的内容。交付范围与验收结果见 `docs/ACCEPTANCE.md`。
+
+可加 `--raw-event-id 45` 仅处理一条 receipt。重建不会改变原消息时间，
+超出上下文时间窗口的转发仍需重新发送。重复执行不会重复建同版本。
+
+### 自动化测试
+
+测试使用 `tests/fixtures/qq_official/` 内的脱敏快照；全新 checkout
+不需要 `.env`、生产数据库或本地 `data/qq_official_samples/`。
+
 ```bash
 .venv/bin/python -m pytest -q
 .venv/bin/python scripts/test_image_vision.py --help
@@ -191,5 +258,8 @@ Vision 复用 OpenAI-compatible endpoint 和 API key。Text 可以使用 DeepSee
 - `docs/ARCHITECTURE.md`
 - `docs/IMPLEMENTATION_PLAN.md`
 - `docs/MESSAGE_MODEL.md`
+- `docs/REFERENCE_REVIEW.md`
+- `docs/OPERATIONS.md`
+- `docs/ACCEPTANCE.md`
 
 后续开发默认先读这几份文档，再读 `app/` 与测试。

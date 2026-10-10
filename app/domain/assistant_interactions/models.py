@@ -17,6 +17,7 @@ class AssistantMode(str, Enum):
 class AssistantTriggerType(str, Enum):
     GROUNDED_QA = "grounded_qa"
     MENTION_CHAT = "mention_chat"
+    REPLY_TO_BOT = "reply_to_bot"
 
 
 @dataclass(frozen=True)

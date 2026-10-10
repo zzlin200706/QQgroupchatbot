@@ -1,6 +1,6 @@
 # IMPLEMENTATION_PLAN.md
 
-文档更新时间：`2026-08-12`
+文档更新时间：`2026-10-10`
 
 ## 计划总原则
 
@@ -19,12 +19,22 @@
 ## Current Completion Status
 
 - QQ Official WebSocket runtime、raw-first persistence、parser/storage、commands、assistant、summary 和 multimodal implementation 已通过自动化验证
-- current full suite: `361 passed`
+- current full suite: `575 passed in 18.70s`（2026-10-09，合并转发阅读与历史重解析回归）
+- reproducible test inputs: sanitized captured fixtures are included; the earlier 521-test revision also passed in a copy without `.env`, runtime database or local captures
 - default transport: `websocket`
 - real OpenAI-compatible text / `#总结` smoke: passed in the existing deployment history
-- real QQ webhook smoke: pending
-- real QQ image + configured vision model smoke: pending
+- real QQ webhook smoke: deferred by user on 2026-10-09 (no public HTTPS); keep existing WebSocket configuration, not a blocker for the current transport
+- real QQ image + configured vision model smoke: passed on 2026-10-09 for an ordinary JPEG followed by a structured mention; vision `gpt-5.6-luna` via configured compatible endpoint, text answer via DeepSeek; user confirmed accurate description
 - reply-only automatic continuation: intentionally unsupported
+- durable outbox worker: completed; command/assistant failures are not blindly retried after possible delivery
+- outbound response validation: nonzero business codes override 2xx/id; asynchronous 201/202 acceptance remains unconfirmed, with summary/raw retained and no blind retry (offline integration covered)
+- long-window summary: complete structured chunk inputs, bounded user prompts, strict failure handling; prompt version `3` adds readable/unverified forwarded-content rules
+- forward reading: parser v3 retains provided display text and recursively preserves explicit reply/forward MsgElement trees, provenance and shared depth/node limits. Renderer hides signed image URLs; QA/chat/summary read domain data only. Offline replay appends v3 without executing interactions. Safe display-image reading remains supported. Real samples omit some nested content; on 2026-10-10 the user canceled automatic fetching of that missing content. NapCat/OneBot is not integrated; related research is archived, not an active phase.
+- 2026-10-07 real preflight: QQ auth / Gateway READY / runtime health passed; DeepSeek and configured compatible provider both produced validated summaries from synthetic text
+- 2026-10-08 real ingestion + `#ping`: passed, including user-confirmed receipt of `pong`. Raw 34/35 and normalized messages persisted; QQ passive reply API returned 200; outbox 1 completed with one attempt. See `docs/ACCEPTANCE.md`.
+- 2026-10-08 user constraint: live acceptance is ingestion + `#ping` only; summary/assistant/vision are disabled for this run and no conversation data may be sent to a model. Live AI acceptance remains unverified.
+- 2026-10-09 authorization update: user explicitly approved one test-group summary of the last 120 minutes via api.deepseek.com. Real raw 36/37 → normalized messages → validated summary 3 → QQ HTTP 200 → outbox 2 completed, one attempt. Requested model `deepseek-v4-flash`, returned model `deepseek-flash`; user explicitly confirmed seeing the summary. DeepSeek text end-to-end acceptance passed. Temporary process stopped; `.env` unchanged. This supersedes the prior no-egress restriction only for the confirmed test.
+- 2026-10-09 assistant acceptance: after user approved the disclosed test scopes, real grounded QA (raw 39/interaction 9/outbox 3) and structured mention chat (raw 40/interaction 10/outbox 4) passed through DeepSeek and QQ. Both receipts match persisted interactions; one attempt each. Answers matched the actual test plan, and the user confirmed both replies. Temporary process stopped; persistent feature flags unchanged.
 
 ## Historical / Completed Foundation
 
@@ -35,6 +45,7 @@
 - Gateway HELLO / IDENTIFY / RESUME / HEARTBEAT
 - reconnect loop 与 `session_start_limit` 感知退避
 - QQ Official raw event capture 与 `raw_events` 落库
+- durable `interaction_outbox` 与有界 worker；`#ping` 在 AI 功能关闭时仍可消费
 - `QQOfficialMessageParser`
 - `InternalMessage` / segment tree / provenance / identity 模型
 - `MessageRepository` 与 `message_nodes` 树持久化
@@ -50,11 +61,15 @@
 
 这些基础已经足以支撑后续真实环境 smoke test 和 provider 扩展。
 
-## Historical Phase — DeepSeek Real End-to-End Validation
+## Completed Phase — DeepSeek Real End-to-End Validation
+
+2026-10-09 完成真实入站、模型生成、摘要持久化、QQ 被动回复和用户侧
+收到摘要的完整验收，证据见 `docs/ACCEPTANCE.md`。以下保留该阶段目标
+与验收标准，文本基础链路进入冻结维护阶段，不代表其他功能已经验收。
 
 ### 目标
 
-当前立即目标不是再扩展新能力，而是完成真实环境下的文本 summary 闭环验收：
+该阶段目标是在扩展新能力前，完成真实环境下的文本 summary 闭环验收：
 
 ```text
 真实 QQ Official 群消息
@@ -227,9 +242,8 @@ QQ Official Gateway
 ### 当前状态
 
 - implementation validated
-- real QQ smoke pending
-- 尚未做真实群 `#ping`
-- 尚未做真实群 `#总结`
+- 2026-10-08 真实普通消息入库与 `#ping` 完整闭环通过，用户确认客户端已看到 `pong`
+- 2026-10-09 当前改动后的 DeepSeek 实群 `#总结` 生成/持久化/QQ 回复及客户端可见性均通过，用户明确确认已看到总结，详见验收记录
 
 ## Completed Implementation — QQ Official Webhook-ready Inbound Architecture
 
@@ -263,9 +277,9 @@ QQ Official WebSocket / Webhook
 
 - implementation validated
 - automated tests passed
-- real QQ webhook smoke pending
+- real QQ webhook smoke deferred by user on 2026-10-09; no public HTTPS, keep WebSocket
 - `GROUP_MESSAGE_CREATE` automated code support: yes
-- `GROUP_MESSAGE_CREATE` real webhook verification: pending
+- `GROUP_MESSAGE_CREATE` real webhook verification: unverified, deferred with the webhook smoke
 - 若真实 webhook 只收到 `GROUP_AT_MESSAGE_CREATE`，则保留 WebSocket 为当前正式 transport，不伪造“全量普通群消息能力”
 
 ## Phase N — Complete Group Assistant Text Interaction Layer
@@ -330,9 +344,9 @@ ASSISTANT_COOLDOWN_SECONDS=3
 
 - implementation validated
 - automated unit/integration tests remain covered by the current full suite
-- real QQ assistant smoke pending
+- real QQ text assistant smoke passed on 2026-10-09: grounded QA and structured mention chat in GROUP_MESSAGE_CREATE, including user-confirmed receipt; images and other event variants remain separate gates
 - default inbound transport remains `websocket`
-- Phase M webhook automated support remains validated; real webhook smoke remains pending
+- Phase M webhook automated support remains validated; real webhook smoke is deferred by user, and WebSocket remains the chosen transport
 
 ## Completed — Provider Configuration / Selection
 
@@ -394,7 +408,12 @@ QQ attachment
 - 普通图片不触发下载、不调用 vision/text LLM、不回复
 - 本地人工脚本 `scripts/test_image_vision.py`
 
-AI description 是 transient derived data，不作为 source truth 持久化。真实 QQ image + provider smoke pending；自动化测试只使用 HTTP/fake provider boundary。
+AI description 是 transient derived data，不作为 source truth 持久化。
+2026-10-09 真实 JPEG 普通入库后显式 @ 场景通过：raw 41/42、interaction
+11、outbox 5；117297 bytes 图片成功识别，用户确认回复描述正确。源码
+image segment 未持久化 AI description。vision 临时配置为兼容接口上的
+`gpt-5.6-luna`，文本仍用 DeepSeek；其他图片交互/MIME 场景不据此声称
+实测完成。自动化测试仍使用 HTTP/fake provider boundary。
 
 ## Completed — Reliability Hardening
 

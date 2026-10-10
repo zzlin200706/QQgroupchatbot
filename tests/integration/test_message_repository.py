@@ -23,6 +23,7 @@ from app.domain.messages import (
 )
 from app.parsers import QQOfficialMessageParser
 from app.services.normalized_message_ingestion import (
+    QQ_OFFICIAL_PARSER_VERSION,
     QQOfficialNormalizedMessageIngestionService,
 )
 from app.services.raw_event_ingestion import QQOfficialRawEventIngestionService
@@ -32,7 +33,7 @@ from app.storage.models import RawEvent
 from app.storage.raw_event_repository import RawEventRepository
 
 
-QQ_SAMPLES = Path(__file__).parents[2] / "data" / "qq_official_samples"
+QQ_SAMPLES = Path(__file__).parents[1] / "fixtures" / "qq_official" / "captured"
 
 
 async def create_storage(tmp_path: Path) -> tuple[Database, RawEventRepository, MessageRepository]:
@@ -339,7 +340,7 @@ async def test_live_qq_gateway_pipeline_commits_raw_before_normalized_message(
             await message_repository.get_by_raw_event_id(
                 stored_raw.id,
                 parser_name="qq_official_message_parser",
-                parser_version="1",
+                parser_version=QQ_OFFICIAL_PARSER_VERSION,
             )
             == stored_message
         )

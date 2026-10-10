@@ -42,6 +42,10 @@ MessageRepository
 SQLite
         ↓
 QQOfficialInteractionDispatcher
+        ↓
+interaction_outbox
+        ↓
+InteractionOutboxWorker (bounded asyncio tasks)
 ├── QQOfficialCommandDispatcher
 │   ├── #ping
 │   └── #总结 → SummaryService
@@ -115,6 +119,7 @@ persisted ImageSegment metadata
 - `summary_repository.py`
 - `assistant_interaction_repository.py`
 - `command_trigger_claim_repository.py`
+- `interaction_outbox_repository.py`
 - `message_codec.py` / `summary_codec.py`
 
 ### `app/services/`
@@ -126,6 +131,7 @@ persisted ImageSegment metadata
 - `SummaryService`
 - `SummaryCommandHandler`
 - `QQOfficialInteractionDispatcher`
+- `InteractionOutboxWorker`
 - `GroupAssistantContextBuilder`
 - `GroupAssistantService`
 - `GroupAssistantHandler`
@@ -199,14 +205,22 @@ persisted ImageSegment metadata
 
 当前 parser 的几个关键边界：
 
-- `message_type == 102`：保存为 unresolved `ForwardSegment`
+- `message_type == 102`：平台展示正文保存于 `ForwardSegment.content`，没有结构化节点仍为 unresolved；若明确提供 `msg_elements`，保留 `ForwardNode` 的独立作者与嵌套 provenance，不从正文拆姓名或伪造时间
 - `message_type == 103`：保留 opaque `msg_elements` / `message_scene`，并把一致、格式有效的 target `REFIDX` 保存为 `ReplySegment.reference_key`
 - mention 只有在 `content` token 与 `mentions[]` 明确对应时才生成 `AtSegment`
 - mention 的 `is_self` 只来自明确布尔 `mentions[].is_you`；`GROUP_AT_MESSAGE_CREATE` 由官方事件类型确认 Bot mention
 - image attachment 只映射官方/真实 sample 提供的 filename、URL、MIME、size、width、height；parser 不下载图片
 - 未确认结构一律保留为 `UnknownSegment`
 
-parser 不访问 SQLite，也不解析 quoted author。当前 runtime 不做 reply target lookup；未来如果需要 reply / forward 网络补全，仍应通过概念接口实现：
+转发和引用里的转发共用 parser 的深度/节点预算，Gateway ingestion 与
+outbox raw fallback 使用同一配置实例。renderer 只访问内部 segments，
+不读取 raw JSON；展示文本标为未核验，嵌入的 HTTP(S) 链接只在展示时
+隐藏，完整事实仍留 raw/storage。parser v3 重解析工具仅追加内部模型，
+不经过 command dispatcher/outbox；已有消息的版本与 raw 均保留。
+
+parser 不访问 SQLite，也不猜 quoted author；仅使用显式提供的 author。
+当前 runtime 不做 reply target lookup；未来如果需要 reply / forward
+网络补全，仍应通过概念接口实现：
 
 ```python
 class MessageReferenceResolver:

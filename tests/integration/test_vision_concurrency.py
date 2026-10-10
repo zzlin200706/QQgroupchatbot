@@ -30,6 +30,7 @@ from app.llm.providers.base import LLMProvider, VisionProvider
 from app.services.image_enrichment import ImageEnrichmentService
 from app.services.image_resources import ImageResourceResolver, ImageResolveError
 from app.services.interaction_outbox_worker import InteractionOutboxWorker
+from app.services.command_status import CommandStatus
 from app.storage.database import Database
 from app.storage.interaction_outbox_repository import InteractionOutboxRepository
 from app.storage.models import RawEvent
@@ -39,7 +40,7 @@ from app.storage.raw_event_repository import RawEventRepository
 def _valid_payload(message_id: str = "m-1", with_image: bool = False) -> dict:
     d = {
         "id": message_id,
-        "timestamp": "2026-08-11T12:00:00+08:00",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "group_openid": "g-1",
         "message_type": 7 if with_image else 0,
         "author": {"id": "user-1", "member_openid": "user-1"},
@@ -237,7 +238,7 @@ async def test_vision_and_text_share_one_outbox_semaphore(env) -> None:
         await asyncio.sleep(0.05)
         async with counter:
             in_flight -= 1
-        return None
+        return CommandStatus.SUCCEEDED
 
     worker = InteractionOutboxWorker(
         session_factory=env.database.session_factory,
@@ -304,7 +305,7 @@ async def test_image_download_failure_does_not_crash_interaction(env) -> None:
     async def dispatch(message: InternalMessage) -> object:
         if any(isinstance(seg, ImageSegment) for seg in message.segments):
             await enrichment.enrich_messages((message,))
-        return None
+        return CommandStatus.SUCCEEDED
 
     worker = InteractionOutboxWorker(
         session_factory=env.database.session_factory,

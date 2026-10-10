@@ -14,7 +14,7 @@ from app.storage.models import RawEvent
 from app.storage.raw_event_repository import RawEventRepository
 
 
-QQ_SAMPLE = Path(__file__).parents[2] / "data" / "qq_official_samples" / "001_text.json"
+QQ_SAMPLE = Path(__file__).parents[1] / "fixtures" / "qq_official" / "captured" / "001_text.json"
 
 
 @pytest.mark.asyncio

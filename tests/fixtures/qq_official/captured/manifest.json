@@ -1,0 +1,180 @@
+[
+  {
+    "label": "text",
+    "file": "001_text.json",
+    "event_type": "GROUP_MESSAGE_CREATE",
+    "message_type": 0,
+    "captured_at": "2026-08-10T09:10:22.976136+00:00",
+    "gateway_sequence": 2,
+    "message_id": "fixture-message-03",
+    "duplicate_candidate": false,
+    "captured": true
+  },
+  {
+    "label": "at_bot",
+    "file": "002_at_bot.json",
+    "event_type": "GROUP_MESSAGE_CREATE",
+    "message_type": 0,
+    "captured_at": "2026-08-10T09:11:13.039973+00:00",
+    "gateway_sequence": 2,
+    "message_id": "fixture-message-05",
+    "duplicate_candidate": true,
+    "captured": true
+  },
+  {
+    "label": "at_member",
+    "file": "003_at_member.json",
+    "event_type": "GROUP_MESSAGE_CREATE",
+    "message_type": 0,
+    "captured_at": "2026-08-10T09:11:53.553668+00:00",
+    "gateway_sequence": 2,
+    "message_id": "fixture-message-07",
+    "duplicate_candidate": true,
+    "captured": true
+  },
+  {
+    "label": "image",
+    "file": "004_image.json",
+    "event_type": "GROUP_MESSAGE_CREATE",
+    "message_type": 0,
+    "captured_at": "2026-08-10T09:12:21.403928+00:00",
+    "gateway_sequence": 2,
+    "message_id": "fixture-message-08",
+    "duplicate_candidate": true,
+    "captured": true
+  },
+  {
+    "label": "image_accidental",
+    "file": "005_text_image.json",
+    "event_type": "GROUP_MESSAGE_CREATE",
+    "message_type": 0,
+    "captured_at": "2026-08-10T09:13:09.785111+00:00",
+    "gateway_sequence": 2,
+    "message_id": "fixture-message-09",
+    "duplicate_candidate": true,
+    "captured": true,
+    "intended_label": "text_image",
+    "valid_for_intended_case": false
+  },
+  {
+    "label": "text_image",
+    "file": "006_text_image.json",
+    "event_type": "GROUP_MESSAGE_CREATE",
+    "message_type": 0,
+    "captured_at": "2026-08-10T09:15:23.807256+00:00",
+    "gateway_sequence": 2,
+    "message_id": "fixture-message-10",
+    "duplicate_candidate": true,
+    "captured": true
+  },
+  {
+    "label": "reply_text",
+    "file": "007_reply_text.json",
+    "event_type": "GROUP_MESSAGE_CREATE",
+    "message_type": 103,
+    "captured_at": "2026-08-10T09:21:25.133884+00:00",
+    "gateway_sequence": 2,
+    "message_id": "fixture-message-11",
+    "duplicate_candidate": true,
+    "captured": true
+  },
+  {
+    "label": "reply_image",
+    "file": "008_reply_image.json",
+    "event_type": "GROUP_MESSAGE_CREATE",
+    "message_type": 103,
+    "captured_at": "2026-08-10T09:21:56.154066+00:00",
+    "gateway_sequence": 2,
+    "message_id": "fixture-message-12",
+    "duplicate_candidate": true,
+    "captured": true
+  },
+  {
+    "label": "file",
+    "file": "009_file.json",
+    "event_type": "GROUP_MESSAGE_CREATE",
+    "message_type": 0,
+    "captured_at": "2026-08-10T09:22:46.650634+00:00",
+    "gateway_sequence": 2,
+    "message_id": "fixture-message-13",
+    "duplicate_candidate": true,
+    "captured": true
+  },
+  {
+    "label": "emoji",
+    "file": "010_emoji.json",
+    "event_type": "GROUP_MESSAGE_CREATE",
+    "message_type": 0,
+    "captured_at": "2026-08-10T09:23:12.549227+00:00",
+    "gateway_sequence": 2,
+    "message_id": "fixture-message-14",
+    "duplicate_candidate": true,
+    "captured": true
+  },
+  {
+    "label": "link",
+    "file": "011_link.json",
+    "event_type": "GROUP_MESSAGE_CREATE",
+    "message_type": 0,
+    "captured_at": "2026-08-10T09:23:40.470975+00:00",
+    "gateway_sequence": 2,
+    "message_id": "fixture-message-15",
+    "duplicate_candidate": true,
+    "captured": true
+  },
+  {
+    "label": "merged_forward",
+    "file": "012_merged_forward.json",
+    "event_type": "GROUP_MESSAGE_CREATE",
+    "message_type": 102,
+    "captured_at": "2026-08-10T09:24:21.353013+00:00",
+    "gateway_sequence": 2,
+    "message_id": "fixture-message-19",
+    "duplicate_candidate": true,
+    "captured": true
+  },
+  {
+    "label": "merged_forward_multi_author",
+    "file": "013_merged_forward_multi_author.json",
+    "event_type": "GROUP_MESSAGE_CREATE",
+    "message_type": 102,
+    "captured_at": "2026-08-10T09:25:15.632546+00:00",
+    "gateway_sequence": 2,
+    "message_id": "fixture-message-20",
+    "duplicate_candidate": true,
+    "captured": true
+  },
+  {
+    "label": "merged_forward_image",
+    "file": "014_merged_forward_image.json",
+    "event_type": "GROUP_MESSAGE_CREATE",
+    "message_type": 102,
+    "captured_at": "2026-08-10T09:26:23.415333+00:00",
+    "gateway_sequence": 2,
+    "message_id": "fixture-message-22",
+    "duplicate_candidate": true,
+    "captured": true
+  },
+  {
+    "label": "nested_forward_level2",
+    "file": "015_nested_forward_level2.json",
+    "event_type": "GROUP_MESSAGE_CREATE",
+    "message_type": 102,
+    "captured_at": "2026-08-10T09:27:03.231386+00:00",
+    "gateway_sequence": 2,
+    "message_id": "fixture-message-26",
+    "duplicate_candidate": true,
+    "captured": true
+  },
+  {
+    "label": "nested_forward_level3",
+    "file": "016_nested_forward_level3.json",
+    "event_type": "GROUP_MESSAGE_CREATE",
+    "message_type": 102,
+    "captured_at": "2026-08-10T09:27:45.899782+00:00",
+    "gateway_sequence": 2,
+    "message_id": "fixture-message-59",
+    "duplicate_candidate": true,
+    "captured": true
+  }
+]
